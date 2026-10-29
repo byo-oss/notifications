@@ -389,4 +389,267 @@ describe("useInbox", () => {
     expect(client.inbox.markRead).toHaveBeenCalledWith({ id: "n1" });
     resolveMarkRead!({ data: {}, error: null });
   });
+
+  // A count request that started before a read is answered after it. The
+  // stale value must not win, and the revalidation after the POST is what sets
+  // the badge.
+  it("drops an unread count that started before markRead", async () => {
+    const client = makeMockClient([makeNotification("n1")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.unreadCount).toBe(1);
+
+    const stale = deferred<CountResponse>();
+    const revalidated = deferred<CountResponse>();
+    client.inbox.unreadCount
+      .mockImplementationOnce(() => stale.promise)
+      .mockImplementationOnce(() => revalidated.promise);
+
+    const refreshing = result.current.refresh();
+    result.current.markRead("n1");
+    await waitFor(() => expect(result.current.unreadCount).toBe(0));
+    expect(client.inbox.unreadCount).toHaveBeenCalledTimes(3);
+
+    await act(async () => stale.resolve(count(1)));
+    await act(() => refreshing);
+    expect(result.current.unreadCount).toBe(0);
+
+    await act(async () => revalidated.resolve(count(0)));
+    expect(result.current.unreadCount).toBe(0);
+  });
+
+  it("drops an unread count that started before markAllRead", async () => {
+    const client = makeMockClient([makeNotification("n1"), makeNotification("n2")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.unreadCount).toBe(2);
+
+    const stale = deferred<CountResponse>();
+    const revalidated = deferred<CountResponse>();
+    client.inbox.unreadCount
+      .mockImplementationOnce(() => stale.promise)
+      .mockImplementationOnce(() => revalidated.promise);
+
+    const refreshing = result.current.refresh();
+    result.current.markAllRead();
+    await waitFor(() => expect(result.current.unreadCount).toBe(0));
+    expect(client.inbox.unreadCount).toHaveBeenCalledTimes(3);
+
+    await act(async () => stale.resolve(count(2)));
+    await act(() => refreshing);
+    expect(result.current.unreadCount).toBe(0);
+
+    await act(async () => revalidated.resolve(count(0)));
+    expect(result.current.unreadCount).toBe(0);
+  });
+
+  // The list is applied, not dropped: a notification that arrived since mount
+  // must still show. Only the read the response predates is put back.
+  it("keeps a read row read when a list started before markRead resolves", async () => {
+    const client = makeMockClient([makeNotification("n1"), makeNotification("n2")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    const staleList = deferred<ListResponse>();
+    client.inbox.list.mockImplementationOnce(() => staleList.promise);
+    const refreshing = result.current.refresh();
+
+    await act(() => result.current.markRead("n1"));
+
+    await act(async () =>
+      staleList.resolve({
+        data: {
+          notifications: [
+            makeNotification("n1"),
+            makeNotification("n2"),
+            makeNotification("n3"),
+          ],
+          hasMore: false,
+        },
+        error: null,
+      }),
+    );
+    await act(() => refreshing);
+
+    const byId = Object.fromEntries(
+      result.current.notifications.map((n) => [n.id, n.read]),
+    );
+    expect(byId).toEqual({ n1: true, n2: false, n3: false });
+  });
+
+  // The POST is the write: a count or list started while it is in flight can
+  // carry the pre-commit state, so it must not land after the revalidation.
+  it("drops an unread count that started during the markRead POST", async () => {
+    const client = makeMockClient();
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.unreadCount).toBe(2));
+
+    const post = deferred<{ data: unknown; error: null }>();
+    const stale = deferred<CountResponse>();
+    client.inbox.markRead.mockImplementationOnce(() => post.promise);
+    client.inbox.unreadCount
+      .mockImplementationOnce(() => stale.promise) // the refresh below
+      .mockResolvedValueOnce(count(1)); // the revalidation after the POST
+
+    let marking!: Promise<void>;
+    act(() => {
+      marking = result.current.markRead("n1");
+    });
+    const refreshing = result.current.refresh();
+
+    await act(async () => post.resolve({ data: {}, error: null }));
+    await act(() => marking);
+    expect(result.current.unreadCount).toBe(1);
+
+    // the pre-commit value lands last
+    await act(async () => stale.resolve(count(2)));
+    await act(() => refreshing);
+    expect(result.current.unreadCount).toBe(1);
+  });
+
+  it("does not un-read a row when a list started during the markRead POST resolves", async () => {
+    const client = makeMockClient([makeNotification("n1"), makeNotification("n2")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    const post = deferred<{ data: unknown; error: null }>();
+    const staleList = deferred<ListResponse>();
+    client.inbox.markRead.mockImplementationOnce(() => post.promise);
+    client.inbox.list.mockImplementationOnce(() => staleList.promise);
+
+    let marking!: Promise<void>;
+    act(() => {
+      marking = result.current.markRead("n1");
+    });
+    const refreshing = result.current.refresh();
+
+    await act(async () => post.resolve({ data: {}, error: null }));
+    await act(() => marking);
+
+    // the response was computed before the commit, so n1 comes back unread
+    await act(async () =>
+      staleList.resolve({
+        data: {
+          notifications: [
+            makeNotification("n1"),
+            makeNotification("n2"),
+            makeNotification("n3"),
+          ],
+          hasMore: false,
+        },
+        error: null,
+      }),
+    );
+    await act(() => refreshing);
+
+    const byId = Object.fromEntries(
+      result.current.notifications.map((n) => [n.id, n.read]),
+    );
+    expect(byId).toEqual({ n1: true, n2: false, n3: false });
+  });
+
+  // The panel-open refresh started before the click and lands while the POST
+  // is still pending: its rows must not flip back to unread.
+  it("keeps a row read when a list started before markRead resolves during the POST", async () => {
+    const client = makeMockClient([makeNotification("n1"), makeNotification("n2")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    const staleList = deferred<ListResponse>();
+    const post = deferred<{ data: unknown; error: null }>();
+    client.inbox.list.mockImplementationOnce(() => staleList.promise);
+    client.inbox.markRead.mockImplementationOnce(() => post.promise);
+
+    const refreshing = result.current.refresh();
+    let marking!: Promise<void>;
+    act(() => {
+      marking = result.current.markRead("n1");
+    });
+
+    await act(async () =>
+      staleList.resolve({
+        data: {
+          notifications: [makeNotification("n1"), makeNotification("n2")],
+          hasMore: false,
+        },
+        error: null,
+      }),
+    );
+    await act(() => refreshing);
+    expect(result.current.notifications.find((n) => n.id === "n1")?.read).toBe(true);
+
+    await act(async () => post.resolve({ data: {}, error: null }));
+    await act(() => marking);
+    expect(result.current.notifications.find((n) => n.id === "n1")?.read).toBe(true);
+  });
+
+  it("keeps every row read when a list started before markAllRead resolves during the POST", async () => {
+    const client = makeMockClient([makeNotification("n1"), makeNotification("n2")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    const staleList = deferred<ListResponse>();
+    const post = deferred<{ data: unknown; error: null }>();
+    client.inbox.list.mockImplementationOnce(() => staleList.promise);
+    client.inbox.markAllRead.mockImplementationOnce(() => post.promise);
+
+    const refreshing = result.current.refresh();
+    let marking!: Promise<void>;
+    act(() => {
+      marking = result.current.markAllRead();
+    });
+
+    await act(async () =>
+      staleList.resolve({
+        data: {
+          notifications: [makeNotification("n1"), makeNotification("n2")],
+          hasMore: false,
+        },
+        error: null,
+      }),
+    );
+    await act(() => refreshing);
+    expect(result.current.notifications.every((n) => n.read)).toBe(true);
+
+    await act(async () => post.resolve({ data: {}, error: null }));
+    await act(() => marking);
+    expect(result.current.notifications.every((n) => n.read)).toBe(true);
+  });
+
+  // A POST that fails still leaves the server's count behind; the badge must
+  // come back to that value, and markRead keeps rejecting as before.
+  it("revalidates the count when the markRead POST fails", async () => {
+    const client = makeMockClient();
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.unreadCount).toBe(2));
+
+    const offline = new TypeError("Failed to fetch");
+    client.inbox.markRead.mockRejectedValueOnce(offline);
+    // the server still has both unread
+    client.inbox.unreadCount.mockResolvedValueOnce(count(2));
+
+    await act(async () => {
+      await expect(result.current.markRead("n1")).rejects.toBe(offline);
+    });
+    expect(client.inbox.unreadCount).toHaveBeenCalledTimes(2);
+    expect(result.current.unreadCount).toBe(2);
+  });
 });
+
+type CountResponse = { data: { count: number }; error: null };
+type ListResponse = {
+  data: { notifications: ReturnType<typeof makeNotification>[]; hasMore: boolean };
+  error: null;
+};
+
+function count(n: number): CountResponse {
+  return { data: { count: n }, error: null };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}

@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -320,5 +321,34 @@ describe("InboxButton", () => {
 
     const trigger = screen.getByRole("button", { name: /notifications/i });
     expect(trigger.className).toContain("size-9");
+  });
+
+  // Opening the panel starts a refresh, and a row click can land while its
+  // count is still in flight. That count predates the read, so the badge must
+  // not come back when it resolves.
+  it("keeps the badge at the read count when a panel-open refresh lands after a row click", async () => {
+    const client = makeMockClient();
+    render(<InboxButton client={client} />);
+    await waitFor(() => expect(screen.getByText("2")).toBeTruthy());
+
+    let resolveStale!: (v: { data: { count: number }; error: null }) => void;
+    vi.mocked(client.inbox.unreadCount)
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (resolveStale = resolve)),
+      )
+      // the revalidation after the POST sees the read
+      .mockResolvedValueOnce({ data: { count: 1 }, error: null });
+
+    const bell = screen.getByRole("button", { name: /notifications/i });
+    fireEvent.click(bell);
+    await waitFor(() =>
+      expect(client.inbox.unreadCount).toHaveBeenCalledTimes(2),
+    );
+    fireEvent.click(screen.getByText("First notification"));
+    await waitFor(() => expect(bell.textContent).toBe("1"));
+    expect(client.inbox.markRead).toHaveBeenCalledWith({ id: "n1" });
+
+    await act(async () => resolveStale({ data: { count: 2 }, error: null }));
+    expect(bell.textContent).toBe("1");
   });
 });
