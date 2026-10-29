@@ -112,24 +112,36 @@ export async function touchPresence(
   userId: string,
   now = new Date(),
 ) {
-  const existing = await context.adapter.findOne<InboxPresence>({
-    model: "inboxPresence",
-    where: [{ field: "userId", value: userId }],
-  });
-  if (!existing) {
-    await context.adapter.create({
+  const find = () =>
+    context.adapter.findOne<InboxPresence>({
       model: "inboxPresence",
-      data: { userId, lastSeenAt: now },
+      where: [{ field: "userId", value: userId }],
     });
-    return;
+  let existing = await find();
+  if (!existing) {
+    try {
+      await context.adapter.create({
+        model: "inboxPresence",
+        data: { userId, lastSeenAt: now },
+      });
+      return;
+    } catch (error) {
+      // a concurrent first write won the unique row: update it instead
+      existing = await find();
+      if (!existing) throw error;
+    }
   }
   if (
     now.getTime() - new Date(existing.lastSeenAt).getTime() >=
     PRESENCE_WRITE_INTERVAL
   ) {
+    // lt keeps a stale write from moving lastSeenAt backwards
     await context.adapter.update({
       model: "inboxPresence",
-      where: [{ field: "id", value: existing.id }],
+      where: [
+        { field: "id", value: existing.id },
+        { field: "lastSeenAt", operator: "lt", value: now },
+      ],
       update: { lastSeenAt: now },
     });
   }

@@ -177,8 +177,8 @@ export const processDeliveries = (options: ResolvedInboxOptions) =>
 
 // The inbox polls unread-count while the tab is visible and on every refresh,
 // which makes it the presence heartbeat for "send now if the user is away".
-// list is left out: a refresh fetches both at once, and two first-time
-// heartbeats would race to create the same unique row.
+// two overlapping first heartbeats can race to create the same unique row;
+// touchPresence tolerates that.
 async function heartbeat(
   context: AuthContext & {
     session: {

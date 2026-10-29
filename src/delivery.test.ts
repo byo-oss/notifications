@@ -1,7 +1,12 @@
 import { runWithTransaction } from "@better-auth/core/context";
+import type { AuthContext } from "better-auth";
 import { admin } from "better-auth/plugins";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DeliveryContext, InboxChannel } from "./delivery";
+import {
+  type DeliveryContext,
+  type InboxChannel,
+  touchPresence,
+} from "./delivery";
 import { inbox, type InboxOptions, PermanentDeliveryError } from "./index";
 import type { NotificationDelivery } from "./schema";
 import {
@@ -779,6 +784,95 @@ describe("options", () => {
     await auth.api.unreadCount({ headers: alice.headers, query: {} });
     const ctx = await auth.$context;
     expect(await ctx.adapter.findMany({ model: "inboxPresence" })).toHaveLength(0);
+  });
+
+  describe("touchPresence with a concurrent first write", () => {
+    const T0 = new Date("2026-10-29T12:00:00.000Z");
+    const at = (minutes: number) => new Date(T0.getTime() + minutes * MINUTE);
+    const duplicateKey = () =>
+      Object.assign(
+        new Error(
+          'duplicate key value violates unique constraint "inbox_presence_user_id_unique"',
+        ),
+        { code: "23505" },
+      );
+    const authContext = async (auth: ReturnType<typeof createTestAuth>) =>
+      (await auth.$context) as unknown as AuthContext;
+    const withAdapter = <C extends { adapter: object }>(
+      ctx: C,
+      overrides: Record<string, unknown>,
+    ) => ({ ...ctx, adapter: { ...ctx.adapter, ...overrides } }) as C;
+
+    it("updates the row when a duplicate insert means a concurrent write won", async () => {
+      const auth = createTestAuth(emailAfter15().options);
+      const alice = await signUpUser(auth, "alice@example.com");
+      const ctx = await authContext(auth);
+      await touchPresence(ctx, alice.user.id, at(0));
+
+      // the first read misses (the other write was not visible yet), then the insert collides
+      let misses = 1;
+      const raced = withAdapter(ctx, {
+        findOne: async (args: { model: string }) =>
+          args.model === "inboxPresence" && misses-- > 0
+            ? null
+            : ctx.adapter.findOne(args as never),
+        create: async () => {
+          throw duplicateKey();
+        },
+      });
+      await expect(touchPresence(raced, alice.user.id, at(5))).resolves.toBeUndefined();
+
+      const rows = await ctx.adapter.findMany<{ lastSeenAt: Date }>({
+        model: "inboxPresence",
+        where: [{ field: "userId", value: alice.user.id }],
+      });
+      expect(rows).toHaveLength(1);
+      expect(new Date(rows[0]!.lastSeenAt).getTime()).toBe(at(5).getTime());
+    });
+
+    it("rethrows an insert failure when no row exists", async () => {
+      const auth = createTestAuth(emailAfter15().options);
+      const alice = await signUpUser(auth, "alice@example.com");
+      const ctx = await authContext(auth);
+      const broken = withAdapter(ctx, {
+        findOne: async () => null,
+        create: async () => {
+          throw duplicateKey();
+        },
+      });
+      await expect(touchPresence(broken, alice.user.id, at(0))).rejects.toThrow(
+        /duplicate key/,
+      );
+      expect(
+        await ctx.adapter.findMany({
+          model: "inboxPresence",
+          where: [{ field: "userId", value: alice.user.id }],
+        }),
+      ).toHaveLength(0);
+    });
+
+    it("never moves lastSeenAt backwards for a stale read", async () => {
+      const auth = createTestAuth(emailAfter15().options);
+      const alice = await signUpUser(auth, "alice@example.com");
+      const ctx = await authContext(auth);
+      await touchPresence(ctx, alice.user.id, at(0));
+      // a read taken at T0, before a newer write lands at T5
+      const stale = await ctx.adapter.findOne<{ id: string; lastSeenAt: Date }>({
+        model: "inboxPresence",
+        where: [{ field: "userId", value: alice.user.id }],
+      });
+      await touchPresence(ctx, alice.user.id, at(5));
+
+      const behind = withAdapter(ctx, { findOne: async () => stale });
+      await touchPresence(behind, alice.user.id, at(3));
+
+      const rows = await ctx.adapter.findMany<{ lastSeenAt: Date }>({
+        model: "inboxPresence",
+        where: [{ field: "userId", value: alice.user.id }],
+      });
+      expect(rows).toHaveLength(1);
+      expect(new Date(rows[0]!.lastSeenAt).getTime()).toBe(at(5).getTime());
+    });
   });
 });
 
