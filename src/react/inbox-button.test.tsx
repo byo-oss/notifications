@@ -351,4 +351,69 @@ describe("InboxButton", () => {
     await act(async () => resolveStale({ data: { count: 2 }, error: null }));
     expect(bell.textContent).toBe("1");
   });
+
+  // Offline: the transport rejects instead of resolving to { error }. The panel
+  // fires these without awaiting, so each rejection must be caught there, not
+  // surface as an unhandled rejection in the app.
+  it("catches rejected writes and Load more without an unhandled rejection", async () => {
+    const client = makeMockClient();
+    const offline = new TypeError("fetch failed");
+    vi.mocked(client.inbox.markRead).mockRejectedValue(offline);
+    vi.mocked(client.inbox.markAllRead).mockRejectedValue(offline);
+    vi.mocked(client.inbox.list).mockImplementation(async ({ query }) => {
+      // the first page and the panel-open refresh are offset 0; Load more is not
+      if (query.offset) throw offline;
+      return {
+        data: {
+          notifications: [
+            {
+              id: "n1",
+              userId: "u1",
+              type: "test",
+              title: "First notification",
+              href: "/notifications/n1",
+              read: false,
+              createdAt: new Date().toISOString(),
+            },
+          ],
+          hasMore: true,
+        },
+        error: null,
+      };
+    });
+    const onNavigate = vi.fn();
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    window.addEventListener("unhandledrejection", unhandled);
+    try {
+      render(<InboxButton client={client} onNavigate={onNavigate} />);
+      await waitFor(() => expect(screen.getByText("2")).toBeTruthy());
+
+      fireEvent.click(screen.getByRole("button", { name: /notifications/i }));
+      await waitFor(() =>
+        expect(screen.getByText("First notification")).toBeTruthy(),
+      );
+      // Load more first: it pages by the unread rows held, and Mark all read
+      // would leave none, so the offset would fall back to 0
+      fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
+      await waitFor(() =>
+        expect(client.inbox.list).toHaveBeenCalledWith({
+          query: { limit: 20, offset: 1, filter: "unread" },
+        }),
+      );
+      fireEvent.click(screen.getByText("First notification"));
+      fireEvent.click(screen.getByRole("button", { name: /mark all read/i }));
+
+      expect(client.inbox.markRead).toHaveBeenCalledWith({ id: "n1" });
+      expect(client.inbox.markAllRead).toHaveBeenCalled();
+      // navigation is not held up by the failed write
+      expect(onNavigate).toHaveBeenCalledWith("/notifications/n1");
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.removeListener("unhandledRejection", unhandled);
+      window.removeEventListener("unhandledrejection", unhandled);
+    }
+  });
 });
