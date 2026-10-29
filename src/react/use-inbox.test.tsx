@@ -499,7 +499,7 @@ describe("useInbox", () => {
 
     await act(async () => post.resolve({ data: {}, error: null }));
     await act(() => marking);
-    expect(result.current.unreadCount).toBe(1);
+    await waitFor(() => expect(result.current.unreadCount).toBe(1));
 
     // the pre-commit value lands last
     await act(async () => stale.resolve(count(2)));
@@ -616,6 +616,141 @@ describe("useInbox", () => {
     expect(result.current.notifications.every((n) => n.read)).toBe(true);
   });
 
+  // The list was computed after the click but before the commit, so it still
+  // has the row unread. Nothing else re-applies the read, so settle must.
+  it("keeps a row read when a list started after markRead resolves before the POST does", async () => {
+    const client = makeMockClient([makeNotification("n1"), makeNotification("n2")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    const post = deferred<{ data: unknown; error: null }>();
+    const staleList = deferred<ListResponse>();
+    client.inbox.markRead.mockImplementationOnce(() => post.promise);
+    client.inbox.list.mockImplementationOnce(() => staleList.promise);
+
+    let marking!: Promise<void>;
+    act(() => {
+      marking = result.current.markRead("n1");
+    });
+    const refreshing = result.current.refresh();
+
+    await act(async () =>
+      staleList.resolve({
+        data: {
+          notifications: [makeNotification("n1"), makeNotification("n2")],
+          hasMore: false,
+        },
+        error: null,
+      }),
+    );
+    await act(() => refreshing);
+
+    await act(async () => post.resolve({ data: {}, error: null }));
+    await act(() => marking);
+
+    const byId = Object.fromEntries(
+      result.current.notifications.map((n) => [n.id, n.read]),
+    );
+    expect(byId).toEqual({ n1: true, n2: false });
+  });
+
+  it("keeps every row read when a list started after markAllRead resolves before the POST does", async () => {
+    const client = makeMockClient([makeNotification("n1"), makeNotification("n2")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    const post = deferred<{ data: unknown; error: null }>();
+    const staleList = deferred<ListResponse>();
+    client.inbox.markAllRead.mockImplementationOnce(() => post.promise);
+    client.inbox.list.mockImplementationOnce(() => staleList.promise);
+
+    let marking!: Promise<void>;
+    act(() => {
+      marking = result.current.markAllRead();
+    });
+    const refreshing = result.current.refresh();
+
+    await act(async () =>
+      staleList.resolve({
+        data: {
+          notifications: [makeNotification("n1"), makeNotification("n2")],
+          hasMore: false,
+        },
+        error: null,
+      }),
+    );
+    await act(() => refreshing);
+
+    await act(async () => post.resolve({ data: {}, error: null }));
+    await act(() => marking);
+    expect(result.current.notifications.every((n) => n.read)).toBe(true);
+  });
+
+  // The POST settles after the scope has moved on. The other scope's rows must
+  // not be marked read, and its count must be fetched after the settle.
+  it("does not mark another scope's rows read when a markAllRead POST settles after a scope switch", async () => {
+    const client = makeMockClient([makeNotification("a1"), makeNotification("a2")]);
+    const { result, rerender } = renderHook(
+      ({ organizationId }: { organizationId?: string }) =>
+        useInbox(client, { organizationId, pollInterval: 0 }),
+      { initialProps: { organizationId: "orgA" } },
+    );
+    await waitFor(() => expect(result.current.unreadCount).toBe(2));
+
+    const post = deferred<{ data: unknown; error: null }>();
+    const bList = deferred<ListResponse>();
+    const bStaleCount = deferred<CountResponse>();
+    client.inbox.markAllRead.mockImplementationOnce(() => post.promise);
+    client.inbox.list.mockImplementationOnce(() => bList.promise);
+    client.inbox.unreadCount
+      .mockImplementationOnce(() => bStaleCount.promise) // orgB's refresh
+      .mockResolvedValueOnce(count(1)); // the revalidation after the POST
+
+    let marking!: Promise<void>;
+    act(() => {
+      marking = result.current.markAllRead();
+    });
+    rerender({ organizationId: "orgB" });
+    await waitFor(() => expect(client.inbox.list).toHaveBeenCalledTimes(2));
+
+    await act(async () => post.resolve({ data: {}, error: null }));
+    await act(() => marking);
+    await waitFor(() => expect(result.current.unreadCount).toBe(1));
+    expect(client.inbox.unreadCount).toHaveBeenLastCalledWith({
+      query: { organizationId: "orgB" },
+    });
+
+    await act(async () =>
+      bList.resolve({
+        data: { notifications: [makeNotification("b1")], hasMore: false },
+        error: null,
+      }),
+    );
+    await act(async () => bStaleCount.resolve(count(1)));
+
+    expect(result.current.notifications.map((n) => [n.id, n.read])).toEqual([
+      ["b1", false],
+    ]);
+    expect(result.current.unreadCount).toBe(1);
+  });
+
+  // The count revalidation is fire-and-forget. A GET that never answers must not
+  // hold the write's promise open, or callers that await markRead hang on it.
+  it("settles markRead and markAllRead with the POST, not the count revalidation", async () => {
+    const client = makeMockClient([makeNotification("n1"), makeNotification("n2")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.unreadCount).toBe(2));
+
+    client.inbox.unreadCount.mockImplementation(() => new Promise(() => {}));
+    const markedRead = vi.fn();
+    const markedAllRead = vi.fn();
+    result.current.markRead("n1").then(markedRead);
+    await waitFor(() => expect(markedRead).toHaveBeenCalled());
+
+    result.current.markAllRead().then(markedAllRead);
+    await waitFor(() => expect(markedAllRead).toHaveBeenCalled());
+  });
+
   // A POST that fails still leaves the server's count behind; the badge must
   // come back to that value, and markRead keeps rejecting as before.
   it("revalidates the count when the markRead POST fails", async () => {
@@ -632,7 +767,7 @@ describe("useInbox", () => {
       await expect(result.current.markRead("n1")).rejects.toBe(offline);
     });
     expect(client.inbox.unreadCount).toHaveBeenCalledTimes(2);
-    expect(result.current.unreadCount).toBe(2);
+    await waitFor(() => expect(result.current.unreadCount).toBe(2));
   });
 });
 
