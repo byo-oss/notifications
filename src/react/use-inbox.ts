@@ -116,8 +116,10 @@ export function useInbox(
   // so a pre-commit value can't land after the revalidation. Reads record the
   // counter at both ends, so a list from before the write or during the POST
   // gets patched. A list computed during the POST still misses the write, so the
-  // settle re-applies it to the rows held. markAllRead is keyed by scope, since
-  // it only touches that organization's rows.
+  // settle re-applies it to the rows held. markAllRead marks its scope at start
+  // only (lists from before it can't hold post-commit rows) and its settle marks
+  // just the rows it held. A failed POST drops its marks and flips back its rows,
+  // unless a later write claimed the same id.
   const mutationsRef = useRef(0);
   const readsRef = useRef(new Map<string, number>());
   const allReadAtRef = useRef(new Map<string, number>());
@@ -321,24 +323,42 @@ export function useInbox(
     async (id: string) => {
       mutationsRef.current += 1;
       cancelCountRetry();
-      readsRef.current.set(id, mutationsRef.current);
+      const write = mutationsRef.current;
+      const prevRead = readsRef.current.get(id);
+      readsRef.current.set(id, write);
       const target = notificationsRef.current.find((n) => n.id === id);
-      if (target && !target.read) {
+      const flipped = !!target && !target.read;
+      if (flipped) {
         setNotifications((prev) =>
           prev.map((n) => (n.id === id ? { ...n, read: true } : n)),
         );
         setUnreadCount((count) => Math.max(0, count - 1));
       }
+      let committed = false;
       try {
         await clientRef.current.inbox.markRead({ id });
+        committed = true;
       } finally {
         mutationsRef.current += 1;
         const settledAt = mutationsRef.current;
-        readsRef.current.set(id, settledAt);
-        // a list computed during the POST missed this read, and nothing else re-applies it
-        setNotifications((prev) =>
-          prev.map((n) => (n.id === id && !n.read ? { ...n, read: true } : n)),
-        );
+        if (committed) {
+          readsRef.current.set(id, settledAt);
+          // a list computed during the POST missed this read, and nothing else re-applies it
+          setNotifications((prev) =>
+            prev.map((n) => (n.id === id && !n.read ? { ...n, read: true } : n)),
+          );
+        } else if (readsRef.current.get(id) === write) {
+          // not committed: drop this write's mark, and flip back the row it changed
+          // unless an earlier claim (prevRead) still holds the id. A later write
+          // on the id has its own mark, so this one leaves it alone.
+          if (prevRead === undefined) readsRef.current.delete(id);
+          else readsRef.current.set(id, prevRead);
+          if (flipped && prevRead === undefined) {
+            setNotifications((prev) =>
+              prev.map((n) => (n.id === id ? { ...n, read: false } : n)),
+            );
+          }
+        }
         void revalidateCountRef.current(settledAt, 0);
       }
     },
@@ -372,23 +392,55 @@ export function useInbox(
   const markAllRead = useCallback(async () => {
     mutationsRef.current += 1;
     cancelCountRetry();
-    allReadAtRef.current.set(scope, mutationsRef.current);
+    const write = mutationsRef.current;
+    const prevAllRead = allReadAtRef.current.get(scope);
+    allReadAtRef.current.set(scope, write);
+    // Only these rows are known to exist at the commit. A row that arrives during
+    // the POST may be post-commit, so the settle leaves it alone. The cost: one
+    // that arrived before the commit and is listed in the window stays unread
+    // until the next refresh. The count is still right.
+    const held = new Set(
+      notificationsRef.current.filter((n) => !n.read).map((n) => n.id),
+    );
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
     setUnreadCount(0);
+    let committed = false;
     try {
       await clientRef.current.inbox.markAllRead(
         organizationId ? { organizationId } : {},
       );
+      committed = true;
     } finally {
       mutationsRef.current += 1;
       const settledAt = mutationsRef.current;
-      allReadAtRef.current.set(scope, settledAt);
-      // same as markRead: a list computed during the POST missed this write.
       // Rows now belong to another scope if it moved on, so leave them alone.
-      if (scopeRef.current === scope) {
-        setNotifications((prev) =>
-          prev.map((n) => (n.read ? n : { ...n, read: true })),
-        );
+      const inScope = scopeRef.current === scope;
+      if (committed) {
+        for (const id of held) readsRef.current.set(id, settledAt);
+        // same as markRead: a list computed during the POST missed this write
+        if (inScope) {
+          setNotifications((prev) =>
+            prev.map((n) =>
+              held.has(n.id) && !n.read ? { ...n, read: true } : n,
+            ),
+          );
+        }
+      } else {
+        // drop this write's scope mark, unless a later write replaced it
+        if (allReadAtRef.current.get(scope) === write) {
+          if (prevAllRead === undefined) allReadAtRef.current.delete(scope);
+          else allReadAtRef.current.set(scope, prevAllRead);
+        }
+        // a markRead that claimed an id after this write started keeps its row read
+        if (inScope) {
+          setNotifications((prev) =>
+            prev.map((n) =>
+              held.has(n.id) && n.read && (readsRef.current.get(n.id) ?? 0) <= write
+                ? { ...n, read: false }
+                : n,
+            ),
+          );
+        }
       }
       void revalidateCountRef.current(settledAt, 0);
     }
