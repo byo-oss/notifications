@@ -36,6 +36,13 @@ function makeMockClient(
   return client;
 }
 
+// state set by timers only lands when act flushes it
+function advance(ms: number) {
+  return act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
 function setVisibility(state: DocumentVisibilityState) {
   Object.defineProperty(document, "visibilityState", {
     configurable: true,
@@ -734,6 +741,112 @@ describe("useInbox", () => {
     expect(result.current.unreadCount).toBe(1);
   });
 
+  it("rolls back the rows a failed markAllRead flipped and leaves read rows alone", async () => {
+    const client = makeMockClient([
+      makeNotification("n1"),
+      makeNotification("n2", { read: true }),
+    ]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.unreadCount).toBe(1));
+
+    client.inbox.markAllRead.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await act(async () => {
+      await expect(result.current.markAllRead()).rejects.toThrow(
+        "Failed to fetch",
+      );
+    });
+
+    const byId = Object.fromEntries(
+      result.current.notifications.map((n) => [n.id, n.read]),
+    );
+    expect(byId).toEqual({ n1: false, n2: true });
+    await waitFor(() => expect(result.current.unreadCount).toBe(1));
+  });
+
+  // The POST is pending when a refresh starts, so its list is computed before
+  // the commit and still has n1 and n2 unread. n3 arrived after the commit.
+  it("leaves a row that arrived during a markAllRead POST unread when its list resolves during the POST", async () => {
+    const client = makeMockClient([makeNotification("n1"), makeNotification("n2")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    const post = deferred<{ data: unknown; error: null }>();
+    const staleList = deferred<ListResponse>();
+    client.inbox.markAllRead.mockImplementationOnce(() => post.promise);
+    client.inbox.list.mockImplementationOnce(() => staleList.promise);
+
+    let marking!: Promise<void>;
+    act(() => {
+      marking = result.current.markAllRead();
+    });
+    const refreshing = result.current.refresh();
+
+    await act(async () =>
+      staleList.resolve({
+        data: {
+          notifications: [
+            makeNotification("n1"),
+            makeNotification("n2"),
+            makeNotification("n3"),
+          ],
+          hasMore: false,
+        },
+        error: null,
+      }),
+    );
+    await act(() => refreshing);
+
+    await act(async () => post.resolve({ data: {}, error: null }));
+    await act(() => marking);
+
+    const byId = Object.fromEntries(
+      result.current.notifications.map((n) => [n.id, n.read]),
+    );
+    expect(byId).toEqual({ n1: true, n2: true, n3: false });
+  });
+
+  // Same as above, but the list is still in flight when the POST settles. A
+  // list from during the POST must not mark n3 read through the settle either.
+  it("leaves a row that arrived during a markAllRead POST unread when its list resolves after the settle", async () => {
+    const client = makeMockClient([makeNotification("n1"), makeNotification("n2")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    const post = deferred<{ data: unknown; error: null }>();
+    const staleList = deferred<ListResponse>();
+    client.inbox.markAllRead.mockImplementationOnce(() => post.promise);
+    client.inbox.list.mockImplementationOnce(() => staleList.promise);
+
+    let marking!: Promise<void>;
+    act(() => {
+      marking = result.current.markAllRead();
+    });
+    const refreshing = result.current.refresh();
+
+    await act(async () => post.resolve({ data: {}, error: null }));
+    await act(() => marking);
+
+    await act(async () =>
+      staleList.resolve({
+        data: {
+          notifications: [
+            makeNotification("n1"),
+            makeNotification("n2"),
+            makeNotification("n3"),
+          ],
+          hasMore: false,
+        },
+        error: null,
+      }),
+    );
+    await act(() => refreshing);
+
+    const byId = Object.fromEntries(
+      result.current.notifications.map((n) => [n.id, n.read]),
+    );
+    expect(byId).toEqual({ n1: true, n2: true, n3: false });
+  });
+
   // The count revalidation is fire-and-forget. A GET that never answers must not
   // hold the write's promise open, or callers that await markRead hang on it.
   it("settles markRead and markAllRead with the POST, not the count revalidation", async () => {
@@ -768,6 +881,285 @@ describe("useInbox", () => {
     });
     expect(client.inbox.unreadCount).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(result.current.unreadCount).toBe(2));
+  });
+
+  it("rolls back the row when the markRead POST fails", async () => {
+    const client = makeMockClient();
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.unreadCount).toBe(2));
+
+    client.inbox.markRead.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    // the server still has both unread
+    client.inbox.unreadCount.mockResolvedValueOnce(count(2));
+
+    await act(async () => {
+      await expect(result.current.markRead("n1")).rejects.toThrow(
+        "Failed to fetch",
+      );
+    });
+    expect(
+      result.current.notifications.find((n) => n.id === "n1")?.read,
+    ).toBe(false);
+    await waitFor(() => expect(result.current.unreadCount).toBe(2));
+  });
+
+  // The list was computed before the write, so it still has n1 unread. Once the
+  // write has failed, nothing should patch n1 read.
+  it("does not patch a row read for a list that started before a failed markRead", async () => {
+    const client = makeMockClient([makeNotification("n1"), makeNotification("n2")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    const staleList = deferred<ListResponse>();
+    client.inbox.list.mockImplementationOnce(() => staleList.promise);
+    const refreshing = result.current.refresh();
+
+    client.inbox.markRead.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await act(async () => {
+      await expect(result.current.markRead("n1")).rejects.toThrow(
+        "Failed to fetch",
+      );
+    });
+
+    await act(async () =>
+      staleList.resolve({
+        data: {
+          notifications: [makeNotification("n1"), makeNotification("n2")],
+          hasMore: false,
+        },
+        error: null,
+      }),
+    );
+    await act(() => refreshing);
+
+    const byId = Object.fromEntries(
+      result.current.notifications.map((n) => [n.id, n.read]),
+    );
+    expect(byId).toEqual({ n1: false, n2: false });
+  });
+
+  // An overlapping write that succeeded owns the row. Its read must survive an
+  // earlier write on the same id failing after it.
+  it("keeps a row read when an overlapping markRead on it succeeds after an earlier one fails", async () => {
+    const client = makeMockClient([makeNotification("n1"), makeNotification("n2")]);
+    const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    let failFirst!: (reason: unknown) => void;
+    const post2 = deferred<{ data: unknown; error: null }>();
+    client.inbox.markRead
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            failFirst = reject;
+          }),
+      )
+      .mockImplementationOnce(() => post2.promise);
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.markRead("n1");
+    });
+    act(() => {
+      second = result.current.markRead("n1");
+    });
+    const firstRejected = expect(first).rejects.toThrow("Failed to fetch");
+
+    await act(async () => {
+      failFirst(new TypeError("Failed to fetch"));
+      await firstRejected;
+    });
+    await act(async () => post2.resolve({ data: {}, error: null }));
+    await act(() => second);
+
+    expect(
+      result.current.notifications.find((n) => n.id === "n1")?.read,
+    ).toBe(true);
+  });
+
+  // A failed revalidation was never retried, so the badge kept the optimistic
+  // count until a panel open or a visibility change.
+  it("retries a failed count revalidation and lands on the server's count", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = makeMockClient();
+      const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+      await advance(0);
+      expect(result.current.unreadCount).toBe(2);
+
+      // the server reads 0, not the optimistic 1: another tab read n2 too
+      client.inbox.unreadCount
+        .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+        .mockResolvedValueOnce(count(0));
+      await act(async () => {
+        await result.current.markRead("n1");
+      });
+      await advance(0);
+      expect(client.inbox.unreadCount).toHaveBeenCalledTimes(2);
+      expect(result.current.unreadCount).toBe(1);
+
+      await advance(1_000);
+      expect(client.inbox.unreadCount).toHaveBeenCalledTimes(3);
+      expect(result.current.unreadCount).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending count retry when a newer write starts", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = makeMockClient();
+      const { result } = renderHook(() => useInbox(client, { pollInterval: 0 }));
+      await advance(0);
+
+      client.inbox.unreadCount.mockRejectedValueOnce(
+        new TypeError("Failed to fetch"),
+      );
+      await act(async () => {
+        await result.current.markRead("n1");
+      });
+      await advance(0);
+      expect(client.inbox.unreadCount).toHaveBeenCalledTimes(2);
+
+      // the newer write's own revalidation takes over, and it reads 0
+      client.inbox.unreadCount.mockResolvedValueOnce(count(0));
+      await act(async () => {
+        await result.current.markRead("n2");
+      });
+      await advance(10_000);
+      expect(client.inbox.unreadCount).toHaveBeenCalledTimes(3);
+      expect(result.current.unreadCount).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending count retry on unmount", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = makeMockClient();
+      const { result, unmount } = renderHook(() =>
+        useInbox(client, { pollInterval: 0 }),
+      );
+      await advance(0);
+
+      client.inbox.unreadCount.mockRejectedValueOnce(
+        new TypeError("Failed to fetch"),
+      );
+      await act(async () => {
+        await result.current.markRead("n1");
+      });
+      await advance(0);
+      expect(client.inbox.unreadCount).toHaveBeenCalledTimes(2);
+
+      unmount();
+      await advance(10_000);
+      expect(client.inbox.unreadCount).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["transport", "error response"])(
+    "retries three times after a %s failure, then reports it",
+    async (kind) => {
+      vi.useFakeTimers();
+      try {
+        const client = makeMockClient();
+        const { result } = renderHook(() =>
+          useInbox(client, { pollInterval: 0 }),
+        );
+        await advance(0);
+
+        const failure =
+          kind === "transport" ? new TypeError("Failed to fetch") : { status: 500 };
+        client.inbox.unreadCount.mockImplementation(() =>
+          kind === "transport"
+            ? Promise.reject(failure)
+            : Promise.resolve({ data: null, error: failure }),
+        );
+        await act(async () => {
+          await result.current.markRead("n1");
+        });
+
+        // the first attempt, then retries at 1s, 2s and 4s
+        await advance(6_999);
+        expect(client.inbox.unreadCount).toHaveBeenCalledTimes(4);
+        expect(result.current.error).toBeNull();
+
+        await advance(1);
+        expect(client.inbox.unreadCount).toHaveBeenCalledTimes(5);
+        expect(result.current.error).toBe(failure);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  // Under the unread filter, a markRead that commits while a loadMore page is in
+  // flight shifts the server's unread set. The page then starts one row too far
+  // along and the row in between is never shown.
+  it("refetches a loadMore page that a markRead shifted, so no unread row is skipped", async () => {
+    let unread = ["n1", "n2", "n3", "n4", "n5"];
+    const pageAt = (offset: number) => ({
+      data: {
+        notifications: unread
+          .slice(offset, offset + 2)
+          .map((id) => makeNotification(id)),
+        hasMore: offset + 2 < unread.length,
+      },
+      error: null,
+    });
+    const client = makeMockClient();
+    client.inbox.list.mockImplementation(async ({ query }) =>
+      pageAt(query.offset ?? 0),
+    );
+    client.inbox.unreadCount.mockImplementation(async () =>
+      count(unread.length),
+    );
+    client.inbox.markRead.mockImplementation(async ({ id }) => {
+      unread = unread.filter((x) => x !== id);
+      return { data: {}, error: null };
+    });
+
+    const { result } = renderHook(() =>
+      useInbox(client, { filter: "unread", pageSize: 2, pollInterval: 0 }),
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.notifications.map((n) => n.id)).toEqual(["n1", "n2"]);
+
+    // the loadMore request is computed by the server once it is released
+    const release = deferred<void>();
+    client.inbox.list.mockImplementationOnce(async ({ query }) => {
+      await release.promise;
+      return pageAt(query.offset ?? 0);
+    });
+    let more!: Promise<void>;
+    act(() => {
+      more = result.current.loadMore();
+    });
+    await act(async () => {
+      await result.current.markRead("n1");
+    });
+    await act(async () => {
+      release.resolve();
+      await more;
+    });
+
+    // the first response started at n4; the refetch starts at n3 (offset 1)
+    expect(client.inbox.list).toHaveBeenLastCalledWith({
+      query: { limit: 2, offset: 1, filter: "unread" },
+    });
+    await waitFor(() =>
+      expect(result.current.notifications.map((n) => n.id)).toEqual([
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+      ]),
+    );
   });
 });
 

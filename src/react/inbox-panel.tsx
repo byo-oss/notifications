@@ -15,6 +15,11 @@ export type InboxPanelProps = {
   labels?: Partial<InboxLabels> | undefined;
 };
 
+// these writes and Load more run without an awaiter. A failure is already
+// handled by the hook (the badge resyncs, Load more stays for a retry), and
+// there is no error UI, so the rejection is dropped instead of going unhandled
+const ignoreRejection = () => {};
+
 export function InboxPanel({
   inbox,
   onNavigate,
@@ -75,7 +80,7 @@ export function InboxPanel({
         )}
         <button
           type="button"
-          onClick={() => void inbox.markAllRead()}
+          onClick={() => void inbox.markAllRead().catch(ignoreRejection)}
           className="text-sm text-muted-foreground hover:text-foreground"
         >
           {labels.markAllRead}
@@ -104,7 +109,7 @@ export function InboxPanel({
                   <button
                     type="button"
                     onClick={() => {
-                      void inbox.markRead(notification.id);
+                      void inbox.markRead(notification.id).catch(ignoreRejection);
                       if (notification.href) onNavigate?.(notification.href);
                     }}
                     className="flex w-full items-start gap-2 px-3 py-2.5 text-left hover:bg-accent/50"
@@ -139,7 +144,7 @@ export function InboxPanel({
       {inbox.hasMore ? (
         <button
           type="button"
-          onClick={() => void inbox.loadMore()}
+          onClick={() => void inbox.loadMore().catch(ignoreRejection)}
           className="border-t border-border px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
         >
           {labels.loadMore}

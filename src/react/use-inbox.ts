@@ -65,6 +65,10 @@ export type UseInboxOptions = {
 // it, though they still join a request already in flight for the same scope.
 const STALE_MS = 5_000;
 
+// Retries for a count that failed to refetch after a write: three, then the
+// error is reported. The badge would otherwise sit on the optimistic value.
+const COUNT_RETRY_MS = [1_000, 2_000, 4_000];
+
 const isHidden = () =>
   typeof document !== "undefined" && document.visibilityState === "hidden";
 
@@ -112,8 +116,10 @@ export function useInbox(
   // so a pre-commit value can't land after the revalidation. Reads record the
   // counter at both ends, so a list from before the write or during the POST
   // gets patched. A list computed during the POST still misses the write, so the
-  // settle re-applies it to the rows held. markAllRead is keyed by scope, since
-  // it only touches that organization's rows.
+  // settle re-applies it to the rows held. markAllRead marks its scope at start
+  // only (lists from before it can't hold post-commit rows) and its settle marks
+  // just the rows it held. A failed POST drops its marks and flips back its rows,
+  // unless a later write claimed the same id.
   const mutationsRef = useRef(0);
   const readsRef = useRef(new Map<string, number>());
   const allReadAtRef = useRef(new Map<string, number>());
@@ -139,10 +145,68 @@ export function useInbox(
     }
   }, [organizationId, scope]);
 
+  // The count after a write settles. Unlike refreshUnreadCount it sees a failed
+  // fetch (a rejected transport, or { error } with no data) and retries, since a
+  // badge left on the optimistic count stays wrong until the next panel open or
+  // visibility change, or forever with pollInterval 0. It skips runRefresh's
+  // in-flight dedupe: a request already in flight started before this write.
+  const countRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(false);
+
+  const cancelCountRetry = useCallback(() => {
+    if (countRetryRef.current) clearTimeout(countRetryRef.current);
+    countRetryRef.current = null;
+  }, []);
+
+  const revalidateCount = useCallback(
+    async (write: number, attempt: number) => {
+      const attemptScope = scopeRef.current;
+      const started = mutationsRef.current;
+      let reason: unknown = null;
+      try {
+        const res = await clientRef.current.inbox.unreadCount(
+          organizationId ? { query: { organizationId } } : undefined,
+        );
+        if (res.data) {
+          if (
+            scopeRef.current === attemptScope &&
+            mutationsRef.current === started
+          ) {
+            setUnreadCount(res.data.count);
+          }
+          return;
+        }
+        reason = res.error;
+      } catch (err) {
+        reason = err;
+      }
+      // a newer write, a scope change or an unmount each takes over from this chain
+      if (
+        !mountedRef.current ||
+        scopeRef.current !== attemptScope ||
+        mutationsRef.current !== write
+      ) {
+        return;
+      }
+      const delay = COUNT_RETRY_MS[attempt];
+      if (delay !== undefined) {
+        countRetryRef.current = setTimeout(() => {
+          countRetryRef.current = null;
+          void revalidateCountRef.current(write, attempt + 1);
+        }, delay);
+        return;
+      }
+      // { error } lands in error state the way a list error does: it is the
+      // server's answer, and a silently stale badge is the worse outcome
+      captureBackgroundError(reason);
+    },
+    [organizationId, captureBackgroundError],
+  );
+
   // Revalidation is a ref so a settle that lands after a scope change refetches
   // the current scope's count. The captured one would drop its own response.
-  const refreshUnreadCountRef = useRef(refreshUnreadCount);
-  refreshUnreadCountRef.current = refreshUnreadCount;
+  const revalidateCountRef = useRef(revalidateCount);
+  revalidateCountRef.current = revalidateCount;
 
   // List responses are applied, not dropped: they carry notifications that
   // arrived since mount, and the panel must show them. Only reads made after
@@ -222,55 +286,83 @@ export function useInbox(
   notificationsRef.current = notifications;
 
   const loadMore = useCallback(async () => {
-    // Under the unread filter the server's result set shrinks as we mark things
-    // read, so paging by list length would skip that many rows. The unread
-    // notifications we hold are still the head of that set — count only those.
-    const loaded =
-      filter === "unread"
-        ? notificationsRef.current.filter((n) => !n.read).length
-        : notificationsRef.current.length;
-    const started = mutationsRef.current;
-    const res = await clientRef.current.inbox.list({
-      query: listQuery(loaded),
-    });
-    if (res.data && scopeRef.current === scope) {
+    // A write that commits while the page is in flight shifts the unread set
+    // under the offset, so the page starts too far along and skips a row. Refetch
+    // from the recomputed offset instead, at most twice; the id dedupe absorbs
+    // any overlap. Concurrent loadMore calls need no guard: they only overlap.
+    for (let refetches = 0; ; refetches++) {
+      // Under the unread filter the server's result set shrinks as we mark things
+      // read, so paging by list length would skip that many rows. The unread
+      // notifications we hold are still the head of that set — count only those.
+      const loaded =
+        filter === "unread"
+          ? notificationsRef.current.filter((n) => !n.read).length
+          : notificationsRef.current.length;
+      const started = mutationsRef.current;
+      const res = await clientRef.current.inbox.list({
+        query: listQuery(loaded),
+      });
+      if (!res.data || scopeRef.current !== scope) return;
+      const shifted = filter === "unread" && mutationsRef.current !== started;
+      if (shifted && refetches < 2) continue;
       const page = withLocalReads(res.data.notifications, started, scope);
       setNotifications((prev) => {
         const seen = new Set(prev.map((n) => n.id));
         return [...prev, ...page.filter((n) => !seen.has(n.id))];
       });
       setHasMore(res.data.hasMore);
+      return;
     }
   }, [listQuery, filter, scope, withLocalReads]);
 
   // The count is revalidated after the POST, in finally, so a failed POST also
   // resyncs the badge. It is not awaited, so the write settles with its POST. It
-  // calls refreshUnreadCount, not refresh(): refresh would join a request already
+  // calls revalidateCount, not refresh(): refresh would join a request already
   // in flight, which started before this write.
   const markRead = useCallback(
     async (id: string) => {
       mutationsRef.current += 1;
-      readsRef.current.set(id, mutationsRef.current);
+      cancelCountRetry();
+      const write = mutationsRef.current;
+      const prevRead = readsRef.current.get(id);
+      readsRef.current.set(id, write);
       const target = notificationsRef.current.find((n) => n.id === id);
-      if (target && !target.read) {
+      const flipped = !!target && !target.read;
+      if (flipped) {
         setNotifications((prev) =>
           prev.map((n) => (n.id === id ? { ...n, read: true } : n)),
         );
         setUnreadCount((count) => Math.max(0, count - 1));
       }
+      let committed = false;
       try {
         await clientRef.current.inbox.markRead({ id });
+        committed = true;
       } finally {
         mutationsRef.current += 1;
-        readsRef.current.set(id, mutationsRef.current);
-        // a list computed during the POST missed this read, and nothing else re-applies it
-        setNotifications((prev) =>
-          prev.map((n) => (n.id === id && !n.read ? { ...n, read: true } : n)),
-        );
-        void refreshUnreadCountRef.current().catch(captureBackgroundError);
+        const settledAt = mutationsRef.current;
+        if (committed) {
+          readsRef.current.set(id, settledAt);
+          // a list computed during the POST missed this read, and nothing else re-applies it
+          setNotifications((prev) =>
+            prev.map((n) => (n.id === id && !n.read ? { ...n, read: true } : n)),
+          );
+        } else if (readsRef.current.get(id) === write) {
+          // not committed: drop this write's mark, and flip back the row it changed
+          // unless an earlier claim (prevRead) still holds the id. A later write
+          // on the id has its own mark, so this one leaves it alone.
+          if (prevRead === undefined) readsRef.current.delete(id);
+          else readsRef.current.set(id, prevRead);
+          if (flipped && prevRead === undefined) {
+            setNotifications((prev) =>
+              prev.map((n) => (n.id === id ? { ...n, read: false } : n)),
+            );
+          }
+        }
+        void revalidateCountRef.current(settledAt, 0);
       }
     },
-    [captureBackgroundError],
+    [cancelCountRetry],
   );
 
   // Seen is what cancels a pending "email if unread" delivery. Ids go out once
@@ -299,30 +391,74 @@ export function useInbox(
 
   const markAllRead = useCallback(async () => {
     mutationsRef.current += 1;
-    allReadAtRef.current.set(scope, mutationsRef.current);
+    cancelCountRetry();
+    const write = mutationsRef.current;
+    const prevAllRead = allReadAtRef.current.get(scope);
+    allReadAtRef.current.set(scope, write);
+    // Only these rows are known to exist at the commit. A row that arrives during
+    // the POST may be post-commit, so the settle leaves it alone. The cost: one
+    // that arrived before the commit and is listed in the window stays unread
+    // until the next refresh. The count is still right.
+    const held = new Set(
+      notificationsRef.current.filter((n) => !n.read).map((n) => n.id),
+    );
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
     setUnreadCount(0);
+    let committed = false;
     try {
       await clientRef.current.inbox.markAllRead(
         organizationId ? { organizationId } : {},
       );
+      committed = true;
     } finally {
       mutationsRef.current += 1;
-      allReadAtRef.current.set(scope, mutationsRef.current);
-      // same as markRead: a list computed during the POST missed this write.
+      const settledAt = mutationsRef.current;
       // Rows now belong to another scope if it moved on, so leave them alone.
-      if (scopeRef.current === scope) {
-        setNotifications((prev) =>
-          prev.map((n) => (n.read ? n : { ...n, read: true })),
-        );
+      const inScope = scopeRef.current === scope;
+      if (committed) {
+        for (const id of held) readsRef.current.set(id, settledAt);
+        // same as markRead: a list computed during the POST missed this write
+        if (inScope) {
+          setNotifications((prev) =>
+            prev.map((n) =>
+              held.has(n.id) && !n.read ? { ...n, read: true } : n,
+            ),
+          );
+        }
+      } else {
+        // drop this write's scope mark, unless a later write replaced it
+        if (allReadAtRef.current.get(scope) === write) {
+          if (prevAllRead === undefined) allReadAtRef.current.delete(scope);
+          else allReadAtRef.current.set(scope, prevAllRead);
+        }
+        // a markRead that claimed an id after this write started keeps its row read
+        if (inScope) {
+          setNotifications((prev) =>
+            prev.map((n) =>
+              held.has(n.id) && n.read && (readsRef.current.get(n.id) ?? 0) <= write
+                ? { ...n, read: false }
+                : n,
+            ),
+          );
+        }
       }
-      void refreshUnreadCountRef.current().catch(captureBackgroundError);
+      void revalidateCountRef.current(settledAt, 0);
     }
-  }, [organizationId, scope, captureBackgroundError]);
+  }, [organizationId, scope, cancelCountRetry]);
 
   useEffect(() => {
     refresh().catch(captureBackgroundError);
   }, [refresh, captureBackgroundError]);
+
+  // A pending retry belongs to the scope and mount it was scheduled in, so a
+  // scope change or unmount drops it. An attempt still in flight sees the flag.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cancelCountRetry();
+    };
+  }, [scope, cancelCountRetry]);
 
   useEffect(() => {
     if (pollInterval <= 0) return;
