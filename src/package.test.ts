@@ -13,8 +13,8 @@ describe("package.json", () => {
     peerDependenciesMeta?: Record<string, { optional?: boolean }>;
   };
 
-  it("is 0.11.1 on the better-auth 1.7.7 baseline", () => {
-    expect(pkg.version).toBe("0.11.1");
+  it("is 0.11.2 on the better-auth 1.7.7 baseline", () => {
+    expect(pkg.version).toBe("0.11.2");
     expect(pkg.peerDependencies?.["better-auth"]).toBe("^1.7.7");
     // emit imports @better-auth/core/context at runtime
     expect(pkg.peerDependencies?.["@better-auth/core"]).toBe("^1.7.7");
