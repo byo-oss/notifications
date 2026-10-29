@@ -1,6 +1,6 @@
 {
   "name": "@byo-oss/notifications",
-  "version": "0.11.3",
+  "version": "0.11.4",
   "description": "In-app notifications for better-auth apps. One plugin, one migration, one component — notifications live in your database, addressed to your users.",
   "license": "MIT",
   "author": "Jarod Stewart",
