@@ -39,17 +39,30 @@
       "require": "./dist/react/index.cjs"
     }
   },
-  "files": ["dist", "README.md", "llms.txt", "skills"],
+  "files": [
+    "dist",
+    "README.md",
+    "llms.txt",
+    "skills"
+  ],
   "scripts": {
     "build": "rm -rf dist && tsup && node -e \"['index.d.ts','client.d.ts','wraps.d.ts','mailer.d.ts','testing.d.ts','react/index.d.ts','react/index.js','index.js','client.js','wraps.js','mailer.js','testing.js'].forEach(f => require('fs').accessSync('dist/' + f))\"",
     "test": "vitest run",
     "test:dist": "vitest run --config vitest.dist.config.ts",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["better-auth", "byo", "notifications", "inbox", "in-app", "react", "plugin"],
+  "keywords": [
+    "better-auth",
+    "byo",
+    "notifications",
+    "inbox",
+    "in-app",
+    "react",
+    "plugin"
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/byo-oss/notifications"
+    "url": "git+https://github.com/byo-oss/notifications.git"
   },
   "homepage": "https://github.com/byo-oss/notifications#readme",
   "publishConfig": {
