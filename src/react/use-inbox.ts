@@ -107,12 +107,59 @@ export function useInbox(
     [pageSize, filter, organizationId],
   );
 
+  // A write is a window: it bumps the counter when it starts and again when its
+  // POST settles. Count responses that started anywhere in the window are dropped,
+  // so a pre-commit value can't land after the revalidation. Reads record the
+  // counter at both ends, so a list from before the write or during the POST
+  // gets patched. A list computed during the POST still misses the write, so the
+  // settle re-applies it to the rows held. markAllRead is keyed by scope, since
+  // it only touches that organization's rows.
+  const mutationsRef = useRef(0);
+  const readsRef = useRef(new Map<string, number>());
+  const allReadAtRef = useRef(new Map<string, number>());
+
+  // The mount, poll and visibility refreshes below have no awaiter. The transport
+  // rejects (rather than resolving to { error }) when the request never reaches
+  // the server, an offline tab, and without a catch that is an unhandled rejection.
+  const captureBackgroundError = useCallback((reason: unknown) => {
+    setError(() => reason);
+  }, []);
+
   const refreshUnreadCount = useCallback(async () => {
+    const started = mutationsRef.current;
     const res = await clientRef.current.inbox.unreadCount(
       organizationId ? { query: { organizationId } } : undefined,
     );
-    if (res.data && scopeRef.current === scope) setUnreadCount(res.data.count);
+    if (
+      res.data &&
+      scopeRef.current === scope &&
+      mutationsRef.current === started
+    ) {
+      setUnreadCount(res.data.count);
+    }
   }, [organizationId, scope]);
+
+  // Revalidation is a ref so a settle that lands after a scope change refetches
+  // the current scope's count. The captured one would drop its own response.
+  const refreshUnreadCountRef = useRef(refreshUnreadCount);
+  refreshUnreadCountRef.current = refreshUnreadCount;
+
+  // List responses are applied, not dropped: they carry notifications that
+  // arrived since mount, and the panel must show them. Only reads made after
+  // the request started are missing from them, so those are put back. A read
+  // id is the same notification in any scope; a markAllRead only covers its own.
+  const withLocalReads = useCallback(
+    (rows: InboxNotification[], since: number, scope: string) => {
+      const allReadAt = allReadAtRef.current.get(scope) ?? 0;
+      return rows.map((n) =>
+        !n.read &&
+        (allReadAt > since || (readsRef.current.get(n.id) ?? 0) > since)
+          ? { ...n, read: true }
+          : n,
+      );
+    },
+    [],
+  );
 
   // Mount, tab visibility and panel open can all fire within a few ms of each other.
   // Calls for the same scope share one in-flight request, and automatic
@@ -138,6 +185,7 @@ export function useInbox(
 
       const promise = (async () => {
         try {
+          const started = mutationsRef.current;
           const [list] = await Promise.all([
             clientRef.current.inbox.list({ query: listQuery(0) }),
             refreshUnreadCount(),
@@ -147,7 +195,9 @@ export function useInbox(
             setError(list.error);
           } else if (list.data) {
             setError(null);
-            setNotifications(list.data.notifications);
+            setNotifications(
+              withLocalReads(list.data.notifications, started, scope),
+            );
             setHasMore(list.data.hasMore);
             lastRefreshRef.current = { scope, at: Date.now() };
           }
@@ -162,7 +212,7 @@ export function useInbox(
       inFlightRef.current = { scope, promise };
       return promise;
     },
-    [listQuery, refreshUnreadCount, scope],
+    [listQuery, refreshUnreadCount, scope, withLocalReads],
   );
   // no parameters, so `onClick={inbox.refresh}` keeps type-checking
   const refresh = useCallback(() => runRefresh(false), [runRefresh]);
@@ -179,29 +229,49 @@ export function useInbox(
       filter === "unread"
         ? notificationsRef.current.filter((n) => !n.read).length
         : notificationsRef.current.length;
+    const started = mutationsRef.current;
     const res = await clientRef.current.inbox.list({
       query: listQuery(loaded),
     });
     if (res.data && scopeRef.current === scope) {
-      const page = res.data.notifications;
+      const page = withLocalReads(res.data.notifications, started, scope);
       setNotifications((prev) => {
         const seen = new Set(prev.map((n) => n.id));
         return [...prev, ...page.filter((n) => !seen.has(n.id))];
       });
       setHasMore(res.data.hasMore);
     }
-  }, [listQuery, filter, scope]);
+  }, [listQuery, filter, scope, withLocalReads]);
 
-  const markRead = useCallback(async (id: string) => {
-    const target = notificationsRef.current.find((n) => n.id === id);
-    if (target && !target.read) {
-      setNotifications((prev) =>
-        prev.map((n) => (n.id === id ? { ...n, read: true } : n)),
-      );
-      setUnreadCount((count) => Math.max(0, count - 1));
-    }
-    await clientRef.current.inbox.markRead({ id });
-  }, []);
+  // The count is revalidated after the POST, in finally, so a failed POST also
+  // resyncs the badge. It is not awaited, so the write settles with its POST. It
+  // calls refreshUnreadCount, not refresh(): refresh would join a request already
+  // in flight, which started before this write.
+  const markRead = useCallback(
+    async (id: string) => {
+      mutationsRef.current += 1;
+      readsRef.current.set(id, mutationsRef.current);
+      const target = notificationsRef.current.find((n) => n.id === id);
+      if (target && !target.read) {
+        setNotifications((prev) =>
+          prev.map((n) => (n.id === id ? { ...n, read: true } : n)),
+        );
+        setUnreadCount((count) => Math.max(0, count - 1));
+      }
+      try {
+        await clientRef.current.inbox.markRead({ id });
+      } finally {
+        mutationsRef.current += 1;
+        readsRef.current.set(id, mutationsRef.current);
+        // a list computed during the POST missed this read, and nothing else re-applies it
+        setNotifications((prev) =>
+          prev.map((n) => (n.id === id && !n.read ? { ...n, read: true } : n)),
+        );
+        void refreshUnreadCountRef.current().catch(captureBackgroundError);
+      }
+    },
+    [captureBackgroundError],
+  );
 
   // Seen is what cancels a pending "email if unread" delivery. Ids go out once
   // per mount; a failed request releases them for the next render to retry.
@@ -228,20 +298,27 @@ export function useInbox(
   }, []);
 
   const markAllRead = useCallback(async () => {
+    mutationsRef.current += 1;
+    allReadAtRef.current.set(scope, mutationsRef.current);
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
     setUnreadCount(0);
-    await clientRef.current.inbox.markAllRead(
-      organizationId ? { organizationId } : {},
-    );
-  }, [organizationId]);
-
-  // These three triggers fire on their own, so nothing is awaiting them. The
-  // transport rejects (rather than resolving to { error }) when the request
-  // never reaches the server — an offline tab — and without a catch that
-  // surfaces as an unhandled rejection in the consumer's app.
-  const captureBackgroundError = useCallback((reason: unknown) => {
-    setError(() => reason);
-  }, []);
+    try {
+      await clientRef.current.inbox.markAllRead(
+        organizationId ? { organizationId } : {},
+      );
+    } finally {
+      mutationsRef.current += 1;
+      allReadAtRef.current.set(scope, mutationsRef.current);
+      // same as markRead: a list computed during the POST missed this write.
+      // Rows now belong to another scope if it moved on, so leave them alone.
+      if (scopeRef.current === scope) {
+        setNotifications((prev) =>
+          prev.map((n) => (n.read ? n : { ...n, read: true })),
+        );
+      }
+      void refreshUnreadCountRef.current().catch(captureBackgroundError);
+    }
+  }, [organizationId, scope, captureBackgroundError]);
 
   useEffect(() => {
     refresh().catch(captureBackgroundError);
