@@ -18,6 +18,11 @@ jobs:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
+      # npm keeps serving the old version as latest for a minute or two after a
+      # publish; a build in that gap labels main's version "next" until the nightly
+      - name: Wait for npm to serve the release
+        if: github.event_name == 'workflow_run'
+        run: sleep 300
       - name: Dispatch a byo.dev rebuild
         env:
           GH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
