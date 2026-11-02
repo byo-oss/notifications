@@ -46,6 +46,35 @@ await auth.api.processDeliveries({}); // REQUIRED from a cron (every minute): se
 // A channel is { deliver({ notification, user, appUrl }) } that throws on failure (retries until maxAttempts) and doesn't mutate its input. throw new PermanentDeliveryError(msg) (or an error with permanent: true) to fail at once, e.g. a bad address. mailerChannel maps a PermanentMailError from the mailer to PermanentDeliveryError; any other mailer error retries, even one marked permanent: true. wrapsEmail (deprecated) does this when @wraps.dev/email rejects a missing or malformed `to` (ValidationError, field to / to[n]); throttling, network, SES and account errors retry. Bounces and suppressions come back as SES events later, not as send errors.
 // Test a custom channel (vitest, ESM only): import { testChannel, deliveryContext } from "@byo-oss/notifications/testing"; testChannel(() => myChannel(fake), { failing: () => myChannel(rejecting), permanentlyFailing?: () => myChannel(bouncing) })
 
+## Web push (optional; inbox({ webPush }); no extra package)
+
+import { inbox, generateVapidKeys, DEFAULT_PUSH_HOSTS } from "@byo-oss/notifications";
+const { publicKey, privateKey } = await generateVapidKeys(); // once; base64url; keep privateKey secret
+inbox({
+  appUrl: "https://app.acme.com",
+  webPush: {
+    vapid: { subject: "mailto:ops@acme.com", publicKey, privateKey },
+    // transport: fakePushTransport() in tests (from /testing); default is fetch, never following redirects
+    // ttl: 86400 (seconds), urgency: "very-low"|"low"|"normal"|"high" (default "normal")
+    // allowedHosts: [...DEFAULT_PUSH_HOSTS, "push.example.com"] // REPLACES the defaults (fcm.googleapis.com, updates.push.services.mozilla.com, *.push.apple.com, *.notify.windows.com); "*." = subdomains only
+  },
+  routes: { "briefing.ready": [{ channel: "push" }] }, // the built-in channel is named "push"; channels.push then throws at boot (reserved); a route to "push" without webPush throws
+});
+// Without webPush: no pushSubscription table, no routes, no channel (unchanged from 0.11). With it, the auth config the migration CLI reads must set webPush too, or the migration omits the table.
+// Subscribe (browser; the server package never touches navigator). requestPermission() must run inside the tap handler on iOS; iPhone needs the Home Screen app.
+const { data } = await authClient.webPushStatus(subscription?); // POST /inbox/push/status → { vapidPublicKey, subscribed, endpointRegistered: boolean|null }
+const reg = await navigator.serviceWorker.register("/sw.js");
+const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: data.vapidPublicKey });
+await authClient.subscribeWebPush(sub);   // POST /inbox/push/subscribe, body { endpoint, keys: { p256dh, auth } } (= sub.toJSON()) → { subscribed: true }; errors PUSH_ENDPOINT_NOT_ALLOWED, PUSH_KEYS_INVALID
+await authClient.unsubscribeWebPush(sub); // POST /inbox/push/unsubscribe { endpoint } → { removed }; call it on sign-out of a shared device
+// server: auth.api.subscribeWebPush / unsubscribeWebPush / webPushStatus({ headers, body }); session-only, own rows only. Same endpoint subscribed by another user moves to them. Max 20 devices per user (longest-unused dropped).
+// Payload is JSON { title, body?, href?, id } and nothing else (no type/data/organizationId); href is an in-app path (relative kept, absolute only if on appUrl's origin, else dropped); title cut at 150, body at 500; plaintext ≤ 3993 bytes. Use generic titles, no body for private things. Every request has TTL, Urgency, Topic (hash of the notification id, ≤32 base64url chars).
+// Security: pushSubscription rows (endpoint, p256dh, auth) are credentials; the library never logs an endpoint; titles/bodies are never logged; errors hold counts and HTTP statuses only. Endpoint must be https, no userinfo, default port, host on allowedHosts, checked at subscribe and before every send (a row that no longer passes is deleted). exportNotificationsData leaves subscriptions out; deleting a user deletes theirs.
+// Delivery: one request per device. 2xx ok (lastUsedAt set). 404/410 → row deleted, resolves. 403 → row deleted, permanent failure. 429/408/5xx/no answer → retry. Other 4xx/3xx → permanent, row kept. Any device accepts → resolves (no repeat to the healthy ones). None accepts + any retryable → throws (retry). None accepts + none retryable → PermanentDeliveryError. Only 404/410s or no devices → resolves ("sent"; a throttle rule counts it).
+// Rotation: rows carry keyId (hash of the public key); rows with another keyId are pruned on the next push to that user and on every sweep; users resubscribe. A private key that doesn't match the public key throws before the first send (so 403s can't wipe rows).
+// Table pushSubscription: id, userId (→ user, cascade, indexed), endpoint (unique), p256dh, auth, keyId, createdAt, lastUsedAt. MySQL/MSSQL make unique strings varchar(255).
+// Test (vitest, ESM): import { fakePushTransport, fakePushSubscription } from "@byo-oss/notifications/testing"; const transport = fakePushTransport({ respond?: 201 | status | (request) => status|throw }); const device = await fakePushSubscription(); await auth.api.subscribeWebPush({ headers, body: device.toJSON() }); ...notify + processDeliveries...; transport.sent[0] = { endpoint, headers, body, ttl, urgency, topic, authorization }; await device.decrypt(transport.sent[0]) → payload. A custom PushTransport is (request: { url, method: "POST", headers, body }) => Promise<{ status }>; throw only when there was no answer.
+
 ## Events (inbox({ onEvent }), after commit)
 
 import { createEventBus } from "@byo-oss/core";
@@ -84,7 +113,7 @@ auth.api.markRead({ headers, body: { id } })
 auth.api.markSeen({ headers, body: { ids } }) // ≤100; cancels pending emails; InboxPanel calls it for rows actually on screen
 auth.api.markAllRead({ headers, body: { organizationId? } })
 auth.api.unreadCount({ headers, query: { organizationId? } }) → { count }
-// same methods on the client: authClient.inbox.list / markRead / markSeen / markAllRead / unreadCount
+// same methods on the client: authClient.inbox.list / markRead / markSeen / markAllRead / unreadCount (web push adds authClient.subscribeWebPush / unsubscribeWebPush / webPushStatus, see Web push)
 
 ## React hook
 
@@ -97,6 +126,7 @@ const seenRef = useSeenOnView(markSeen, { delayMs: 1000, threshold: 0.5 }); // <
 
 ## Notes
 
+- 0.12: opt-in `inbox({ webPush })` adds a built-in `push` channel, table `pushSubscription` and endpoints `/inbox/push/subscribe|unsubscribe|status` (auth.api `subscribeWebPush`, `unsubscribeWebPush`, `webPushStatus`); new root exports `generateVapidKeys`, `DEFAULT_PUSH_HOSTS`; `/testing` exports `fakePushTransport`, `fakePushSubscription`. Re-run migrate with webPush set. Nothing changes without the option
 - 0.11: new `@byo-oss/notifications/mailer` entry, `mailerChannel({ mailer, replyTo?, render? })`, sends through any `Mailer` from `@byo-oss/mailer` (install it in the app, 0.1.1 or later); no `from` option. `wrapsEmail` is deprecated, unchanged, and will be removed in a later breaking release: `wrapsEmail({ from })` becomes `mailerChannel({ mailer: wrapsMailer({ from }) })`. wrapsMailer differs from wrapsEmail: it fails permanently on any @wraps.dev/email ValidationError (bad from, replyTo, recipient or empty subject) and on SES MessageRejected and InvalidParameterValue, where wrapsEmail failed only a bad recipient at once and retried the rest; it throws a TypeError at creation if from is empty; its client must resolve { messageId }; it RFC 2047-encodes a non-ASCII display name in from (mailer 0.1.1+). No schema change, no new options
 - 0.10: better-auth peer ^1.7.7 and a new required peer @better-auth/core (same version); notify rejects notifications.* types and inbox({ routes }) throws at creation for a notifications.* key; onEvent and byo hooks are new; stale sends with no attempts left are failed at most `limit` per sweep (hasMore can be true with nothing due, when the sweep stopped at the cap after failing rows there; rows past the cap stay "sending" until a later sweep); inbox() throws unless batchSize is an integer from 1 to 1000; no migration
 - notification fields: id, userId, organizationId?, type, title, body?, href?, data? (json), read (boolean), seenAt?, createdAt

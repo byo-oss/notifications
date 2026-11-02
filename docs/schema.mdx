@@ -54,6 +54,25 @@ When each user last polled the inbox, so "email if unread" knows who's in the ap
 | `userId` | string → `user.id`, cascade, unique | Whose heartbeat it is |
 | `lastSeenAt` | date | Written at most once a minute |
 
+
+## pushSubscription
+
+Only with the [`webPush`](/docs/notifications/push) option. One row per browser or installed web app a user subscribed. The row is a credential: `endpoint`, `p256dh` and `auth` together let anyone who holds them push to that device. It is never logged and never exported. The auth config your migration CLI reads must set `webPush` too, or the generated migration leaves this table out.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `id` | string | Primary key |
+| `userId` | string → `user.id`, cascade, indexed | Whose device it is |
+| `endpoint` | string, unique | The push service URL for this device |
+| `p256dh` | string | The device's public key, base64url |
+| `auth` | string | The device's authentication secret, base64url |
+| `keyId` | string | Which VAPID key the subscription was saved under. Rows with another `keyId` are deleted |
+| `createdAt` | date | When it was first saved |
+| `lastUsedAt` | date | When it was saved or last accepted by the push service |
+
+On MySQL and MSSQL a unique string column is `varchar(255)`, which can be shorter than a Windows push endpoint.
+
+
 ## Deleting users
 
 Deleting a user removes their rows. On SQL databases this happens through the foreign keys.
@@ -61,4 +80,8 @@ Deleting a user removes their rows. On SQL databases this happens through the fo
 Every reference declares `onDelete: "cascade"`: `notification.userId`, `notificationDelivery.notificationId`, `notificationDelivery.userId` and `inboxPresence.userId`.
 
 On adapters without foreign keys (memory, MongoDB), the plugin removes the rows through a user-delete hook.
+
+
+With `webPush`, `pushSubscription.userId` cascades too, and the hook removes those rows as well.
+
 

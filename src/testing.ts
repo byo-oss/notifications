@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { DeliveryContext, InboxChannel } from "./delivery";
+import { createReceiver, decryptPushMessage } from "./push/decrypt";
+import { toBase64Url } from "./push/encoding";
+import type { PushPayload } from "./push/payload";
+import type { PushRequest, PushTransport } from "./push/transport";
 
 type ChannelFactory = () => InboxChannel | Promise<InboxChannel>;
 
@@ -139,4 +143,99 @@ export function testChannel(
       },
     );
   });
+}
+
+/** One request `fakePushTransport` received. */
+export type RecordedPush = {
+  /** The subscription endpoint it was sent to. */
+  endpoint: string;
+  /** Header names as the library sent them (`TTL`, `Urgency`, `Topic`, ...). */
+  headers: Record<string, string>;
+  /** The encrypted body. */
+  body: Uint8Array;
+  ttl: number;
+  urgency: string;
+  topic: string | undefined;
+  /** The `Authorization: vapid t=..., k=...` header. */
+  authorization: string;
+};
+
+export type FakePushTransport = PushTransport & {
+  /** Every request, in order. */
+  sent: RecordedPush[];
+  /** Forgets the recorded requests. */
+  clear(): void;
+};
+
+export type FakePushTransportOptions = {
+  /**
+   * What the fake push service answers. A status code, or a function of the
+   * request that returns one (or throws, to simulate a network failure).
+   * @default 201
+   */
+  respond?: number | ((request: PushRequest) => number | Promise<number>);
+};
+
+/**
+ * A `webPush.transport` that records every send and never touches the
+ * network. Pass it to `inbox({ webPush: { transport } })` in tests and read
+ * `transport.sent`.
+ *
+ * ```ts
+ * const transport = fakePushTransport()
+ * const auth = betterAuth({ plugins: [inbox({ webPush: { vapid, transport } })] })
+ * // ...notify, then
+ * expect(transport.sent).toHaveLength(1)
+ * ```
+ */
+export function fakePushTransport(
+  options: FakePushTransportOptions = {},
+): FakePushTransport {
+  const sent: RecordedPush[] = [];
+  const transport: PushTransport = async (request) => {
+    sent.push({
+      endpoint: request.url,
+      headers: { ...request.headers },
+      body: request.body,
+      ttl: Number(request.headers.TTL),
+      urgency: request.headers.Urgency ?? "",
+      topic: request.headers.Topic,
+      authorization: request.headers.Authorization ?? "",
+    });
+    const respond = options.respond ?? 201;
+    const status = typeof respond === "number" ? respond : await respond(request);
+    return { status };
+  };
+  return Object.assign(transport, {
+    sent,
+    clear() {
+      sent.length = 0;
+    },
+  });
+}
+
+/**
+ * A browser's side of a push subscription, made in the test: a fresh endpoint
+ * and key pair to give to `subscribeWebPush`, and `decrypt` to read what
+ * `fakePushTransport` recorded for it.
+ */
+export async function fakePushSubscription(
+  options: { endpoint?: string } = {},
+) {
+  const receiver = await createReceiver();
+  const endpoint =
+    options.endpoint ??
+    `https://fcm.googleapis.com/fcm/send/${toBase64Url(globalThis.crypto.getRandomValues(new Uint8Array(24)))}`;
+  return {
+    endpoint,
+    keys: receiver.keys,
+    /** The shape `PushSubscription.toJSON()` returns. */
+    toJSON: () => ({ endpoint, keys: { ...receiver.keys } }),
+    /** Decrypts a recorded send (or its body) into the payload the browser would see. */
+    async decrypt(sent: RecordedPush | Uint8Array): Promise<PushPayload> {
+      const body = sent instanceof Uint8Array ? sent : sent.body;
+      const plaintext = await decryptPushMessage(body, receiver);
+      return JSON.parse(new TextDecoder().decode(plaintext)) as PushPayload;
+    },
+  };
 }

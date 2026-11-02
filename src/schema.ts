@@ -116,6 +116,48 @@ export const schema = {
   },
 } satisfies NonNullable<BetterAuthPlugin["schema"]>;
 
+/**
+ * Added to `schema` only when `inbox({ webPush })` is set. Apps that don't use
+ * web push get no table, no migration and no routes.
+ */
+export const pushSchema = {
+  pushSubscription: {
+    fields: {
+      userId: {
+        type: "string",
+        required: true,
+        index: true,
+        references: { model: "user", field: "id", onDelete: "cascade" },
+      },
+      endpoint: {
+        type: "string",
+        required: true,
+        unique: true,
+      },
+      p256dh: {
+        type: "string",
+        required: true,
+      },
+      auth: {
+        type: "string",
+        required: true,
+      },
+      keyId: {
+        type: "string",
+        required: true,
+      },
+      createdAt: {
+        type: "date",
+        required: true,
+      },
+      lastUsedAt: {
+        type: "date",
+        required: true,
+      },
+    },
+  },
+} satisfies NonNullable<BetterAuthPlugin["schema"]>;
+
 export type Notification = {
   id: string;
   userId: string;
@@ -153,4 +195,21 @@ export type InboxPresence = {
   id: string;
   userId: string;
   lastSeenAt: Date;
+};
+
+/**
+ * A browser's web push subscription. `endpoint`, `p256dh` and `auth` together
+ * are a credential: whoever holds them can push to that device. Only exists
+ * with the `webPush` option.
+ */
+export type PushSubscriptionRow = {
+  id: string;
+  userId: string;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  /** Which VAPID key the subscription was made for. */
+  keyId: string;
+  createdAt: Date;
+  lastUsedAt: Date;
 };

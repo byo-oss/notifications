@@ -175,6 +175,47 @@ describe("the channel entries stay free of the plugin's runtime", () => {
   );
 });
 
+describe("web push uses WebCrypto only", () => {
+  const NODE_CRYPTO = ["node:crypto", "crypto", "web-push"] as const;
+  it.each([
+    "index.js",
+    "index.cjs",
+    "client.js",
+    "client.cjs",
+    "testing.js",
+  ])("%s reaches no node:crypto and no web-push package", (entry) => {
+    expect(reaches(entry, NODE_CRYPTO)).toEqual([]);
+  });
+
+  it.each(["index.js", "index.cjs", "client.js", "client.cjs"])(
+    "%s never touches the browser's navigator",
+    (entry) => {
+      for (const file of new Set(reachable(entry).map((ref) => ref.file))) {
+        expect(readFileSync(join(root, file), "utf8"), file).not.toMatch(
+          /\bnavigator\b/,
+        );
+      }
+    },
+  );
+
+  it("the built root exports generateVapidKeys and the host list, in ESM and CJS", async () => {
+    const esm = await import(pathToFile("index.js"));
+    const cjs = createRequire(import.meta.url)(join(dist, "index.cjs"));
+    for (const mod of [esm, cjs]) {
+      expect(typeof mod.generateVapidKeys).toBe("function");
+      expect(mod.DEFAULT_PUSH_HOSTS).toContain("fcm.googleapis.com");
+    }
+    const keys = await esm.generateVapidKeys();
+    expect(keys.publicKey).toMatch(/^[\w-]{87}$/);
+  });
+
+  it("the built ./testing entry exports the fake transport and subscription", async () => {
+    const mod = await import(pathToFile("testing.js"));
+    expect(typeof mod.fakePushTransport).toBe("function");
+    expect(typeof mod.fakePushSubscription).toBe("function");
+  });
+});
+
 describe("package.json", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
     main?: string;
