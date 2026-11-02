@@ -13,4 +13,7 @@ export const INBOX_ERROR_CODES = defineErrorCodes({
   FAN_OUT_LIMIT_EXCEEDED: "Organization member count exceeds maxFanout",
   RESERVED_NOTIFICATION_TYPE:
     'Notification types starting with "notifications." are reserved for the plugin\'s own events',
+  PUSH_ENDPOINT_NOT_ALLOWED: "This push endpoint is not allowed",
+  PUSH_KEYS_INVALID: "The push subscription keys are not valid",
+  PUSH_SUBSCRIPTION_FAILED: "The push subscription could not be saved",
 });

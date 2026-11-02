@@ -80,6 +80,8 @@ export type ResolvedDeliveryOptions = {
   leaseMs: number;
   immediateLimit: number;
   onEvent: ByoEventHandler | undefined;
+  /** Housekeeping run at the start of each sweep. Errors are logged, never thrown. */
+  beforeSweep?: ((context: AuthContext) => Promise<void>) | undefined;
 };
 
 const PRESENCE_WRITE_INTERVAL = 60_000;
@@ -265,6 +267,13 @@ export async function processDueDeliveries(
   limit = options.batchSize,
 ): Promise<SweepResult> {
   const now = new Date();
+  if (options.beforeSweep) {
+    try {
+      await options.beforeSweep(context);
+    } catch {
+      context.logger.error("[@byo-oss/notifications] sweep housekeeping failed");
+    }
+  }
   // A worker that died mid-send leaves its row in "sending". Release it first
   // so the claim below can stay a plain AND guard on status, unless it has
   // used up its attempts: a send that keeps getting killed would loop forever.

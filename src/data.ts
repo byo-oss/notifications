@@ -73,7 +73,11 @@ async function deleteNotifications(
  * adapters without them (memory, MongoDB) rely on this running after the
  * user row is deleted.
  */
-export async function deleteUserRows(context: AuthContext, userId: string) {
+export async function deleteUserRows(
+  context: AuthContext,
+  userId: string,
+  pushSubscriptions = false,
+) {
   const adapter = await currentAdapter(context);
   await deleteNotifications(adapter, [{ field: "userId", value: userId }]);
   // deliveries carry userId too, so none can be left behind
@@ -85,6 +89,13 @@ export async function deleteUserRows(context: AuthContext, userId: string) {
     model: "inboxPresence",
     where: [{ field: "userId", value: userId }],
   });
+  // the table exists only with the webPush option
+  if (pushSubscriptions) {
+    await adapter.deleteMany({
+      model: "pushSubscription",
+      where: [{ field: "userId", value: userId }],
+    });
+  }
 }
 
 // what each organization endpoint returns says whose notifications to drop
@@ -275,6 +286,9 @@ function decodeCursor(value: string): ExportCursor | null {
  * skipped. A row inserted mid-export is picked up if its `createdAt` is at or
  * after the page you're on; one backdated behind it (an import, say) is not.
  * Presence (`inboxPresence`) isn't exported; it's a minute-level heartbeat.
+ * Neither are push subscriptions (`pushSubscription`): their endpoint and keys
+ * are credentials, so no export, backup or migration tool should carry them.
+ * Devices subscribe again on the other side.
  *
  * A cursor from an earlier release (a bare offset) is rejected: it can't be
  * resumed without skipping rows. Start over with no cursor and keep one copy
