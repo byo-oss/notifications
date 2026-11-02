@@ -15,6 +15,10 @@ The same steps, with checks, ship as a skill: `skills/byo-notifications/SKILL.md
 7. With email routes: install `@byo-oss/mailer` and your provider's SDK (`@wraps.dev/email` for `wrapsMailer`), pass `mailerChannel({ mailer })` in `channels`, configure `channels` and `routes`, and call `auth.api.processDeliveries({})` from a cron every minute. Without the cron, delayed emails and retries never go out.
 8. Events and core: pass `onEvent` built with `createEventBus` from `@byo-oss/core`; `sweepAll(auth)` may replace the `processDeliveries` cron. Events fire after the write commits. Of the calls that emit events, only `notify` joins a caller's `runWithTransaction` (its events wait for the commit, never fire on rollback). The sweep never joins one: its `delivery.failed` events fire at once, so call it outside a transaction.
 
+## Web push
+
+`inbox({ webPush })` is opt-in and must change nothing when unset: no table, no routes, no channel (`src/webpush-off.test.ts` snapshots that). The code is in `src/push/`: `crypto.ts` (RFC 8291 and VAPID on WebCrypto only, no Node crypto, no `web-push` package), `channel.ts` (the built-in `push` channel), `endpoints.ts`, `hosts.ts` (the SSRF allow list), `payload.ts`. `pushSubscription` rows are credentials: never log, return or export an endpoint, `p256dh` or `auth`, and never put one in an error message or `cause`, because the sweep stores and logs `error.message`. Titles and bodies are never logged. Docs: `docs/push.mdx` (inside `<Next>` until released).
+
 ## Events
 
 `inbox({ onEvent })` receives these, after commit. `actorId` is always `null`; `organizationId` is set when the notification has one. No titles, bodies, hrefs, `data` or error text.

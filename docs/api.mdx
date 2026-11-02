@@ -70,6 +70,30 @@ Query: an optional `organizationId`.
 
 Returns `{ count }`.
 
+<Next>
+
+## Web push endpoints
+
+With the [`webPush`](/docs/notifications/push) option the plugin adds three own-row endpoints. They need a session and only see the caller's own subscriptions. Without the option they do not exist.
+
+### `auth.api.subscribeWebPush`
+
+`POST /inbox/push/subscribe`. Body: `{ endpoint, keys: { p256dh, auth } }`, which is `PushSubscription.toJSON()`. The endpoint must be `https` and on `allowedHosts`. Returns `{ subscribed: true }`. Errors: `PUSH_ENDPOINT_NOT_ALLOWED`, `PUSH_KEYS_INVALID`.
+
+### `auth.api.unsubscribeWebPush`
+
+`POST /inbox/push/unsubscribe`. Body: `{ endpoint }`. Deletes the caller's row for it. Returns `{ removed }`.
+
+### `auth.api.webPushStatus`
+
+`POST /inbox/push/status`. Body: an optional `{ endpoint }`. Returns `{ vapidPublicKey, subscribed, endpointRegistered }`, where `endpointRegistered` is `null` without an endpoint. A POST so the endpoint stays out of URLs.
+
+The client plugin adds `authClient.subscribeWebPush(subscription)`, `unsubscribeWebPush(subscription)` and `webPushStatus(subscription?)`, which take a `PushSubscription` or its JSON.
+
+Root exports: `generateVapidKeys()`, `DEFAULT_PUSH_HOSTS`, and the types `WebPushOptions`, `PushTransport`, `PushRequest`, `PushResponse`, `PushPayload`, `PushUrgency` and `PushSubscriptionRow`. `@byo-oss/notifications/testing` adds `fakePushTransport` and `fakePushSubscription`.
+
+</Next>
+
 ## Server-only functions
 
 These are functions, not endpoints. Use them in your own scripts and hooks.

@@ -7,6 +7,18 @@ order: 3
 
 Each section covers one change. Read the sections between your current version and the latest. The default docs describe the latest published release. Sections marked next describe main, which isn't published yet.
 
+<Next>
+
+## 0.12
+
+Additive. Nothing changes for an install that doesn't set the new option: no schema change, no new routes, no new channel.
+
+- **Web push.** `inbox({ webPush: { vapid, transport?, ttl?, urgency?, allowedHosts? } })` adds a built-in `push` channel, a `pushSubscription` table and `subscribeWebPush`, `unsubscribeWebPush` and `webPushStatus` endpoints. Encryption is RFC 8291 and signing is VAPID, on WebCrypto, with no new dependency. Re-run `migrate` (or `generate`) with `webPush` set. See [Web push](/docs/notifications/push).
+- **`push` is reserved** only when `webPush` is set: `channels.push` then throws at boot. A channel of your own named `push` keeps working without the option.
+- **New exports.** `generateVapidKeys`, `DEFAULT_PUSH_HOSTS` and the push types from the root, `fakePushTransport` and `fakePushSubscription` from `/testing`, and `subscribeWebPush`, `unsubscribeWebPush` and `webPushStatus` on the client.
+
+</Next>
+
 ## From better-inbox (0.7)
 
 The package was renamed from `better-inbox` to `@byo-oss/notifications` in 0.7. The API is the same. Change your imports:

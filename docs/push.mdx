@@ -1,0 +1,230 @@
+---
+title: Web push
+description: Send notifications to users' browsers and installed web apps with an opt-in push channel built on WebCrypto, RFC 8291 encryption and VAPID. No extra package.
+group: guides
+order: 5
+---
+
+<Next>
+
+Web push delivers a notification to a browser or an installed web app after the tab is closed. It is a built-in channel named `push`, switched on by the `webPush` option. Without that option the plugin adds no table, no routes and no channel, and nothing about an existing install changes.
+
+Messages are encrypted with RFC 8291 and signed with VAPID (RFC 8292) using WebCrypto only. There is no `web-push` package and no Node-only crypto, so it runs on Node, Bun, Cloudflare Workers and D1.
+
+<Callout kind="warning">
+A subscription row is a credential. Its `endpoint`, `p256dh` and `auth` together let anyone who holds them push to that device. Treat the `pushSubscription` table like a table of API keys: keep it out of backups you share, logs, analytics and exports. The library never logs an endpoint, and neither should you. Titles and bodies are private too: never log them.
+</Callout>
+
+## Set it up
+
+<Steps>
+
+### Make a VAPID key pair
+
+Generate it once and keep the private key in a secret.
+
+```ts title="scripts/vapid.ts"
+import { generateVapidKeys } from "@byo-oss/notifications";
+
+console.log(await generateVapidKeys()); // { publicKey, privateKey }, both base64url
+```
+
+Changing the pair later invalidates every subscription. See [Rotating the key](#rotating-the-key).
+
+### Turn on `webPush` and route a type to `push`
+
+```ts title="lib/auth.ts"
+import { inbox } from "@byo-oss/notifications";
+
+export const auth = betterAuth({
+  plugins: [
+    inbox({
+      appUrl: "https://app.acme.com",
+      webPush: {
+        vapid: {
+          subject: "mailto:ops@acme.com",
+          publicKey: process.env.VAPID_PUBLIC_KEY!,
+          privateKey: process.env.VAPID_PRIVATE_KEY!,
+        },
+      },
+      routes: {
+        "briefing.ready": [{ channel: "push" }],
+      },
+    }),
+  ],
+});
+```
+
+`webPush` is validated when `inbox()` runs. A bad key, subject, `ttl`, `urgency` or `allowedHosts` throws at boot, and the message never contains a key.
+
+### Run the migration with `webPush` set
+
+`webPush` adds one table, `pushSubscription`. The auth config that your migration CLI reads must set `webPush` too, or the generated migration leaves the table out. Production, the CLI and your tests should all pass the same option. The CLI only needs the shape, so a placeholder key pair is enough there.
+
+### Subscribe from the browser
+
+The server package never touches `navigator`. Your app asks the browser for a subscription and hands it to the client. Call `Notification.requestPermission()` straight from the click handler: iOS refuses it anywhere else.
+
+```ts title="lib/push.ts"
+import { authClient } from "./auth-client";
+
+export async function enablePush() {
+  const permission = await Notification.requestPermission(); // first, inside the tap
+  if (permission !== "granted") return false;
+
+  const status = await authClient.webPushStatus();
+  const registration = await navigator.serviceWorker.register("/sw.js");
+  const subscription = await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: status.data!.vapidPublicKey,
+  });
+  await authClient.subscribeWebPush(subscription);
+  return true;
+}
+
+export async function disablePush() {
+  const registration = await navigator.serviceWorker.getRegistration();
+  const subscription = await registration?.pushManager.getSubscription();
+  if (!subscription) return;
+  await authClient.unsubscribeWebPush(subscription);
+  await subscription.unsubscribe();
+}
+```
+
+On iPhone and iPad, web push works only for an app added to the Home Screen.
+
+### Show the notification in a service worker
+
+```js title="public/sw.js"
+self.addEventListener("push", (event) => {
+  const message = event.data?.json() ?? {};
+  event.waitUntil(
+    self.registration.showNotification(message.title ?? "Notification", {
+      body: message.body,
+      tag: message.id,
+      data: { href: message.href },
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const href = event.notification.data?.href;
+  const path = typeof href === "string" && href.startsWith("/") && !href.startsWith("//") ? href : "/";
+  event.waitUntil(self.clients.openWindow(new URL(path, self.location.origin).href));
+});
+```
+
+Browsers require every push to show a notification. Do not skip `showNotification`.
+
+</Steps>
+
+## What is sent
+
+The encrypted message holds these fields and nothing else:
+
+| Field | Value |
+|-------|-------|
+| `title` | The notification's `title`, cut to 150 characters |
+| `body` | The notification's `body` if it has one, cut to 500 characters |
+| `href` | An in-app path such as `/chat/42`. A relative `href` is kept. An absolute `href` on your `appUrl` origin is reduced to its path. Any other link is dropped |
+| `id` | The notification's id |
+
+`type`, `data`, `organizationId` and `userId` stay on the server. The plaintext is capped at 3993 bytes, the most one RFC 8291 record holds: a message that would exceed it loses its link, then its body, then part of its title.
+
+The push service and the device's lock screen see the title and body. Send fixed, generic titles and leave `body` out for anything private.
+
+Every request carries `TTL` (the `ttl` option, default 24 hours), `Urgency` (the `urgency` option, default `normal`) and a `Topic`, a hash of the notification id cut to 32 base64url characters, so a repeated send of one notification collapses at the push service instead of showing twice.
+
+## Options
+
+| Option | Type | Default | Meaning |
+|--------|------|---------|---------|
+| `vapid` | `{ subject, publicKey, privateKey }` | required | `subject` is a `mailto:` or `https:` URI. Keys are base64url: a 65-byte uncompressed public key and a 32-byte private key |
+| `transport` | `PushTransport` | `fetch` | How requests are sent. It must not follow redirects. Use `fakePushTransport()` in tests |
+| `ttl` | integer seconds | `86400` | How long the push service holds a message for an offline device |
+| `urgency` | `"very-low" \| "low" \| "normal" \| "high"` | `"normal"` | The `Urgency` header |
+| `allowedHosts` | `string[]` | `DEFAULT_PUSH_HOSTS` | Hosts a subscription endpoint may have. Replaces the default list, so spread `DEFAULT_PUSH_HOSTS` to extend it. `*.example.com` matches subdomains, not the bare domain |
+
+`DEFAULT_PUSH_HOSTS` is `fcm.googleapis.com` (Chrome, Edge, Brave, Opera, Samsung Internet), `updates.push.services.mozilla.com` (Firefox), `*.push.apple.com` (Safari and iOS) and `*.notify.windows.com` (Windows).
+
+The channel name `push` is reserved when `webPush` is set. A route to `push` without `webPush` throws at boot. With the option unset, a channel of your own named `push` still works.
+
+## Endpoints
+
+All three need a session and only touch the caller's own rows. The input is `PushSubscription.toJSON()`: `{ endpoint, keys: { p256dh, auth } }`. Nothing else is stored.
+
+| `auth.api` key | Path | Body | Returns |
+|----------------|------|------|---------|
+| `subscribeWebPush` | `POST /inbox/push/subscribe` | `{ endpoint, keys }` | `{ subscribed: true }` |
+| `unsubscribeWebPush` | `POST /inbox/push/unsubscribe` | `{ endpoint }` | `{ removed }` |
+| `webPushStatus` | `POST /inbox/push/status` | optional `{ endpoint }` | `{ vapidPublicKey, subscribed, endpointRegistered }` |
+
+`webPushStatus` is a POST so an endpoint never lands in a URL and in an access log. `endpointRegistered` is `null` when no endpoint was given.
+
+The client plugin wraps them: `authClient.subscribeWebPush(subscription)`, `authClient.unsubscribeWebPush(subscription)` and `authClient.webPushStatus(subscription?)`. Each takes a browser `PushSubscription` or its JSON. The typed routes (`authClient.inbox.push.subscribe`) work too.
+
+A refused subscribe returns `PUSH_ENDPOINT_NOT_ALLOWED` or `PUSH_KEYS_INVALID`, and the response never repeats the endpoint.
+
+Subscribing an endpoint that is already stored moves it to the caller and replaces its keys. That is what happens when a second person signs in on the same browser, so also call `unsubscribeWebPush` when someone signs out of a shared device. A user keeps at most 20 devices; the longest-unused one goes first.
+
+## Why an endpoint can't be used for SSRF
+
+An endpoint is a URL the server will call. Before a subscription is saved, and again before every send, it must be `https`, carry no username or password, use the default port, and have a host on `allowedHosts`. Loopback, private and metadata addresses never match. The default transport does not follow redirects, so a push service can't send the server somewhere else. A stored row that no longer passes, because you narrowed `allowedHosts`, is deleted instead of sent to.
+
+## Delivery
+
+Each notification routed to `push` becomes one request per device the user subscribed, sent in parallel.
+
+| Answer from the push service | What happens |
+|------------------------------|--------------|
+| 2xx | Accepted. `lastUsedAt` is updated |
+| 404 or 410 | The subscription is gone. The row is deleted and this is not a failure |
+| 403 | The push service refused your VAPID key. The row is deleted |
+| 429, 408, 5xx, or no answer | Try again later. The row is kept |
+| Any other 4xx, or a redirect | Cannot be fixed by retrying. The row is kept |
+
+Across all of a user's devices:
+
+- **If any device accepts, `deliver` resolves.** The delivery is marked `sent`, so a retry never pushes the healthy devices again. A device that failed at the same time misses that one notification.
+- **If none accepts and at least one can be retried, it throws,** and the delivery retries with the usual backoff.
+- **If none accepts and none can be retried, it throws `PermanentDeliveryError`.** The delivery fails at once.
+- **If every device was gone, or the user has no devices, it resolves.** A delivery with nothing to send is marked `sent`, so a `throttle` rule on a push route also counts it.
+
+Deliveries are at-least-once, like every channel. `shouldDeliver` and `ifUnreadAfter` work on `push` as on any channel, so a per-user opt-out is a `shouldDeliver` check.
+
+Errors from the channel carry a count and HTTP statuses only, for example `web push failed for 1 of 2 subscriptions (503, network), will retry`. That text is stored in `detail` and logged by the sweep, so it never holds an endpoint, a key, a title or a body.
+
+## Rotating the key
+
+Every row records the `keyId` of the VAPID key it was saved under. Browsers tie a subscription to the key it was made with, so after you change `vapid.publicKey` the old subscriptions can no longer be pushed to. Rows with another `keyId` are deleted the next time the user is pushed to and on every `processDeliveries` sweep, and `webPushStatus` reports `subscribed: false` until the user enables push again. A private key that doesn't match the public key is caught before the first send, so a bad deploy can't delete subscriptions through 403s.
+
+## Tests
+
+`@byo-oss/notifications/testing` has a fake push service and a fake browser:
+
+```ts title="push.test.ts"
+import { fakePushSubscription, fakePushTransport } from "@byo-oss/notifications/testing";
+
+const transport = fakePushTransport(); // records sends, never touches the network
+const auth = betterAuth({ plugins: [inbox({ webPush: { vapid, transport }, routes })] });
+
+const device = await fakePushSubscription();
+await auth.api.subscribeWebPush({ headers, body: device.toJSON() });
+await auth.api.notify({ body: { userId, type: "briefing.ready", title: "Your briefing is ready" } });
+await auth.api.processDeliveries({});
+
+expect(transport.sent).toHaveLength(1);
+expect(await device.decrypt(transport.sent[0]!)).toMatchObject({ title: "Your briefing is ready" });
+```
+
+`fakePushTransport({ respond: 410 })` answers every send with that status, or pass a function of the request that returns a status or throws to simulate a network failure. `fakePushSubscription()` uses an endpoint on `fcm.googleapis.com`, which `allowedHosts` accepts by default.
+
+## Data and limits
+
+- `exportNotificationsData` does not export push subscriptions. Devices subscribe again on the other side.
+- Deleting a user deletes their subscriptions, through the foreign key on SQL and through a hook on adapters without one.
+- `endpoint` is a unique column. On MySQL and MSSQL, better-auth makes unique string columns `varchar(255)`, which can be shorter than a Windows push endpoint. Prefer Postgres, SQLite or D1.
+- Add an index on `pushSubscription.userId` if your migration tool doesn't from the schema.
+
+</Next>

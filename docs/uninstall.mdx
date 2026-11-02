@@ -11,4 +11,10 @@ Removing the plugin takes three steps: take out the code, take out the build and
 2. Remove the Tailwind `@source` line and the cron that calls `processDeliveries`.
 3. Drop the tables, the one with foreign keys to `notification` first: `notificationDelivery`, then `inboxPresence` and `notification`. Use the names your adapter or the `schema` option gave them.
 
+<Next>
+
+If you used `webPush`, drop `pushSubscription` as well, and remove your service worker's `push` listener. Rotating or deleting the VAPID key pair makes any subscription that remains useless.
+
+</Next>
+
 The plugin adds no columns to better-auth's own tables (`user`, `organization`, `member`), so there's nothing else to clean up.

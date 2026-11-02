@@ -14,6 +14,7 @@ npm install @byo-oss/notifications @better-auth/core
 - **Addressed to users, not email addresses.** `notify({ userId })` uses your better-auth user ids. Delete a user and their notifications go with them.
 - **Organization-aware.** Notify a whole org — optionally filtered by role — via the better-auth organization plugin: `notify({ organizationId, roles: ["owner", "admin"] })`.
 - **Email when it matters.** Route a notification type to email and it goes out only if the notification is still unread after a delay, or right away if the user isn't in the app. It sends through any [`@byo-oss/mailer`](https://byo.dev/docs/mailer/quickstart) adapter: [Wraps](https://wraps.dev) and your own AWS SES account, an SES client you already have, or [email-sdk](https://byo.dev/docs/mailer/email-sdk) providers such as Resend and Postmark.
+- **Web push, opt-in.** `inbox({ webPush })` adds an encrypted, VAPID-signed push channel on WebCrypto alone, and nothing changes for apps that don't set it.
 - **One React component.** `<InboxButton />` gives you the bell, unread badge, and inbox panel, styled with shadcn CSS variables (works with any shadcn theme, zero runtime dependencies, no shadcn required).
 
 > Community plugin — not affiliated with the better-auth team.
@@ -246,6 +247,56 @@ Emails that are due right away (an away user, a rule with no delay) are sent ins
 
 Every delivery is a row in `notificationDelivery` (see [Schema](#schema)), with its status and the reason it was skipped or the last error.
 
+## Web push
+
+Web push is an opt-in channel: notifications reach a user's browser or installed web app after the tab is closed. It is encrypted with RFC 8291 and signed with VAPID (RFC 8292) on WebCrypto, so there is no `web-push` package and no Node-only crypto, and it runs on Node, Bun, Workers and D1. Without the `webPush` option the plugin adds no table, no routes and no channel.
+
+> **Subscription rows are credentials.** A `pushSubscription` row's `endpoint`, `p256dh` and `auth` together let anyone who holds them push to that device. Keep the table out of shared backups, logs and analytics. The library never logs an endpoint, and a notification's title and body are never logged either. Don't log them yourself.
+
+```ts
+import { generateVapidKeys, inbox } from "@byo-oss/notifications";
+
+// once, then keep the private key in a secret
+const keys = await generateVapidKeys(); // { publicKey, privateKey }, base64url
+
+inbox({
+  appUrl: "https://app.acme.com",
+  webPush: {
+    vapid: { subject: "mailto:ops@acme.com", publicKey: process.env.VAPID_PUBLIC_KEY!, privateKey: process.env.VAPID_PRIVATE_KEY! },
+    // transport: fakePushTransport(),   // tests: records sends, never touches the network
+    // ttl: 86400, urgency: "normal",     // defaults
+    // allowedHosts: [...DEFAULT_PUSH_HOSTS, "push.example.com"], // replaces the defaults
+  },
+  routes: { "briefing.ready": [{ channel: "push" }] }, // "push" is built in
+});
+```
+
+The `pushSubscription` table exists only with `webPush`, so the auth config your migration CLI reads must set `webPush` too, or the generated migration leaves it out.
+
+From the browser, your app gets a subscription from `navigator` and hands it to the client; the server package never touches `navigator`. Call `Notification.requestPermission()` from the tap handler (iOS requires it), and on iPhone the app must be on the Home Screen.
+
+```ts
+const { data } = await authClient.webPushStatus();            // { vapidPublicKey, subscribed, endpointRegistered }
+const registration = await navigator.serviceWorker.register("/sw.js");
+const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: data!.vapidPublicKey });
+await authClient.subscribeWebPush(subscription);              // or subscription.toJSON()
+await authClient.unsubscribeWebPush(subscription);            // on opt-out and on sign-out of a shared device
+```
+
+Your service worker shows the push (browsers require a visible notification for every push). Its message is `{ title, body?, href?, id }`: `title` and `body` from the notification, `href` reduced to an in-app path (an absolute link to another site is dropped), and the notification's `id`. Nothing else leaves the server: no `type`, `data` or `organizationId`. Plaintext is capped at 3993 bytes. Send generic titles and leave out `body` for anything private, since the push service and the lock screen can see them.
+
+Every request carries `TTL`, `Urgency` and a `Topic` (a hash of the notification id, at most 32 base64url characters) so a repeated send collapses at the push service.
+
+**Who may be called.** A subscription's endpoint must be `https`, have no credentials or port, and be on `allowedHosts` (default `DEFAULT_PUSH_HOSTS`: FCM, Mozilla, Apple, Windows), both when it is saved and before every send. The default transport never follows a redirect. A signed-in user can't aim the server at another address.
+
+**Delivery.** One request per device, in parallel. 2xx accepted. 404 and 410 delete the row and resolve. 403 (VAPID mismatch) deletes the row. 429, 408, 5xx and no answer retry. If any device accepts, `deliver` resolves, so a retry never pushes the healthy devices again. If none accepts and any can be retried, it throws and the delivery retries. If none can be retried it throws `PermanentDeliveryError`. A user with no devices resolves with nothing sent, which a `throttle` rule still counts as a send. Thrown messages hold counts and statuses only.
+
+**Rotating the key.** Rows record the `keyId` of the VAPID key they were saved under. After you change the key, rows with an old `keyId` are deleted on the next push to that user and on every sweep, and users subscribe again. A private key that doesn't match the public key is caught before the first send, so a bad deploy can't delete subscriptions through 403s.
+
+Endpoints (session only, own rows): `POST /inbox/push/subscribe`, `/inbox/push/unsubscribe` and `/inbox/push/status` (a POST so an endpoint never lands in a URL). A user keeps at most 20 devices. `exportNotificationsData` leaves subscriptions out, and deleting a user deletes theirs. On MySQL and MSSQL the unique `endpoint` column is `varchar(255)`, which can be shorter than a Windows endpoint.
+
+In tests, `fakePushTransport()` and `fakePushSubscription()` from `@byo-oss/notifications/testing`: `transport.sent` records every request, and `await device.decrypt(transport.sent[0])` returns the payload the browser would see. The full guide is [byo.dev/docs/notifications/push](https://byo.dev/docs/notifications/push).
+
 ## Events
 
 Pass `onEvent` and the plugin reports what happened as [`ByoEvent`](https://github.com/byo-oss/core)s, so other packages (an activity feed, metrics, a bridge to another tool) can react without calling into this one:
@@ -310,6 +361,7 @@ await runWithTransaction(adapter, work, {
 | `maxFanout` | number | `1000` | Most members one organization `notify` may reach |
 | `organizationCleanup` | boolean | `true` | Delete notifications when an org is deleted or a member is removed or leaves. Off also leaves them out of `@byo-oss/core`'s `deleteOrganizationData`/`deleteMemberData` fan-out |
 | `onEvent` | `ByoEventHandler` | | Receives `notifications.*` [events](#events) after the write commits. Errors are logged, never thrown |
+| `webPush` | `{ vapid, transport?, ttl?, urgency?, allowedHosts? }` | | Turns on the built-in `push` channel, the `pushSubscription` table and three endpoints. See [Web push](#web-push) |
 | `schema` | | | Rename tables and fields |
 
 A `DeliveryRule`:
@@ -337,6 +389,8 @@ A `DeliveryRule`:
 | `auth.api.unreadCount` | own rows | `query: { organizationId? }` | `{ count }` |
 
 "Own rows" endpoints need a session and only ever see or change the caller's own notifications.
+
+With `webPush`, three more own-row endpoints exist: `auth.api.subscribeWebPush` (`body: { endpoint, keys: { p256dh, auth } }` → `{ subscribed: true }`; errors `PUSH_ENDPOINT_NOT_ALLOWED`, `PUSH_KEYS_INVALID`), `auth.api.unsubscribeWebPush` (`body: { endpoint }` → `{ removed }`) and `auth.api.webPushStatus` (`body: { endpoint? }` → `{ vapidPublicKey, subscribed, endpointRegistered }`). The client plugin wraps them as `authClient.subscribeWebPush(subscription)`, `unsubscribeWebPush(subscription)` and `webPushStatus(subscription?)`. Root exports: `generateVapidKeys`, `DEFAULT_PUSH_HOSTS` and the types `WebPushOptions`, `PushTransport`, `PushRequest`, `PushResponse`, `PushPayload`, `PushUrgency`, `PushSubscriptionRow`.
 
 Server-only functions (not endpoints), for your own scripts and hooks:
 
@@ -372,7 +426,7 @@ testChannel(() => slackChannel({ fetch: fakeFetch }), {
 });
 ```
 
-It checks that `deliver` resolves for full and minimal notifications and for relative and absolute links, doesn't change its input, and throws when the send fails, which is what makes a delivery retry. If your channel reports sends that can never succeed, pass `permanentlyFailing` too, and it checks that those throw a `PermanentDeliveryError`. `deliveryContext(overrides)` builds a sample context for your own tests. The built-in Wraps channel runs the same suite.
+It checks that `deliver` resolves for full and minimal notifications and for relative and absolute links, doesn't change its input, and throws when the send fails, which is what makes a delivery retry. If your channel reports sends that can never succeed, pass `permanentlyFailing` too, and it checks that those throw a `PermanentDeliveryError`. `deliveryContext(overrides)` builds a sample context for your own tests. The built-in Wraps and push channels run the same suite. For web push, `fakePushTransport({ respond? })` records sends (`transport.sent`) and answers with a status, or a function of the request that returns one or throws; `fakePushSubscription()` is a browser's side: pass `device.toJSON()` to `subscribeWebPush` and `await device.decrypt(sent)` to read what arrived.
 
 ## Schema
 
@@ -419,6 +473,19 @@ These tables are a public contract: a change that breaks reading existing rows i
 | `userId` | string → `user.id`, cascade, unique | Whose heartbeat it is |
 | `lastSeenAt` | date | Written at most once a minute |
 
+**`pushSubscription`**: only with `webPush`. One row per browser or installed web app a user subscribed. A credential: never logged, never exported.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `id` | string | Primary key |
+| `userId` | string → `user.id`, cascade, indexed | Whose device it is |
+| `endpoint` | string, unique | The push service URL for the device |
+| `p256dh` | string | The device's public key, base64url |
+| `auth` | string | The device's authentication secret, base64url |
+| `keyId` | string | The VAPID key the row was saved under. Rows with another `keyId` are deleted |
+| `createdAt` | date | When it was first saved |
+| `lastUsedAt` | date | When it was saved or last accepted by the push service |
+
 ## Performance note
 
 Add an index for the list query once you have real traffic — plugin schemas can't declare indexes, so it's one manual line, e.g. drizzle:
@@ -443,6 +510,14 @@ index("notification_delivery_notification_idx").on(table.notificationId)
 // only if you export without an organizationId:
 index("notification_created_idx").on(table.createdAt)
 ```
+
+## Upgrading to 0.12
+
+Additive; an install that doesn't set the new option is unchanged: no schema change, no new routes, no new channel.
+
+- **Web push.** `inbox({ webPush })` adds the built-in `push` channel, the `pushSubscription` table and the three endpoints above. Re-run `migrate` (or `generate`) with `webPush` set. See [Web push](#web-push).
+- **`push` is reserved** only when `webPush` is set: `channels.push` then throws at boot. A channel of your own named `push` keeps working without the option.
+- **New exports.** `generateVapidKeys`, `DEFAULT_PUSH_HOSTS` and the push types from the root, `fakePushTransport` and `fakePushSubscription` from `/testing`, and `subscribeWebPush`, `unsubscribeWebPush`, `webPushStatus` on the client.
 
 ## Upgrading to 0.11
 
@@ -494,11 +569,11 @@ If you hand `useInbox` your own client object rather than `authClient`, add `mar
 
 ## What this is not (yet)
 
-In-app first: email follows a notification that went unread, and it uses the inbox's own read state to decide. Notification preferences, push, SMS, digests and realtime websockets aren't here yet. Polling + refetch on tab visibility covers the badge honestly. If you need full multi-channel delivery pipelines today, look at [Novu](https://novu.co) or [betternotify](https://github.com/better-notify/better-notify).
+In-app first: email follows a notification that went unread, and it uses the inbox's own read state to decide. Web push is an opt-in channel ([Web push](#web-push)). Notification preferences, SMS, digests and realtime websockets aren't here yet. Polling + refetch on tab visibility covers the badge honestly. If you need full multi-channel delivery pipelines today, look at [Novu](https://novu.co) or [betternotify](https://github.com/better-notify/better-notify).
 
 ## Outgrowing this
 
-You've outgrown it when you need push, SMS or chat next to in-app, a preference center and digests across channels, non-engineers editing notification templates, or realtime delivery to thousands of concurrent users. The usual next stops are [Knock](https://knock.app), [Novu](https://novu.co) and [Courier](https://www.courier.com).
+You've outgrown it when you need SMS or chat next to in-app, a preference center and digests across channels, non-engineers editing notification templates, or realtime delivery to thousands of concurrent users. The usual next stops are [Knock](https://knock.app), [Novu](https://novu.co) and [Courier](https://www.courier.com).
 
 Neither Knock nor Novu documents a way to import past notifications: their messages come from triggering a workflow, stamped with the current time and unread. So moving is a forward cutover, and your `notification` table stays the archive.
 
@@ -525,6 +600,8 @@ Knock is the more direct fit: its tenants take `organizationId` as-is, and it do
 1. Remove `inbox()` from `betterAuth({ plugins })`, `inboxClient()` from your auth client, and `InboxButton` / `useInbox` from your UI.
 2. Remove the Tailwind `@source` line and the cron that calls `processDeliveries`.
 3. Drop the tables, the one with foreign keys to `notification` first: `notificationDelivery`, then `inboxPresence` and `notification`. Use the names your adapter or the `schema` option gave them.
+
+If you used `webPush`, drop `pushSubscription` too and remove your service worker's `push` listener.
 
 The plugin adds no columns to better-auth's own tables (`user`, `organization`, `member`), so there's nothing else to clean up.
 
