@@ -22,13 +22,11 @@ Pass these to `inbox(options)` in your better-auth config. Every option is optio
 | `organizationCleanup` | boolean | `true` | Delete notifications when an org is deleted or a member is removed or leaves |
 | `schema` | | | Rename tables and fields |
 
-<Next>
 
 | Option | Type | Default | Meaning |
 |--------|------|---------|---------|
 | `webPush` | `{ vapid, transport?, ttl?, urgency?, allowedHosts? }` | | Turns on the built-in `push` channel, the `pushSubscription` table and three endpoints. Without it none of those exist. See [Web push](/docs/notifications/push) |
 
-</Next>
 
 `organizationCleanup: false` keeps an org's and a member's notifications when they're removed, for example for an audit trail. `deleteOrganizationData` and `deleteMemberData` still work when it's off. See [Notify an organization](/docs/notifications/organizations#cleanup).
 

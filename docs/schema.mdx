@@ -54,7 +54,6 @@ When each user last polled the inbox, so "email if unread" knows who's in the ap
 | `userId` | string → `user.id`, cascade, unique | Whose heartbeat it is |
 | `lastSeenAt` | date | Written at most once a minute |
 
-<Next>
 
 ## pushSubscription
 
@@ -73,7 +72,6 @@ Only with the [`webPush`](/docs/notifications/push) option. One row per browser 
 
 On MySQL and MSSQL a unique string column is `varchar(255)`, which can be shorter than a Windows push endpoint.
 
-</Next>
 
 ## Deleting users
 
@@ -83,9 +81,7 @@ Every reference declares `onDelete: "cascade"`: `notification.userId`, `notifica
 
 On adapters without foreign keys (memory, MongoDB), the plugin removes the rows through a user-delete hook.
 
-<Next>
 
 With `webPush`, `pushSubscription.userId` cascades too, and the hook removes those rows as well.
 
-</Next>
 

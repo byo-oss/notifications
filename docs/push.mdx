@@ -5,7 +5,6 @@ group: guides
 order: 5
 ---
 
-<Next>
 
 Web push delivers a notification to a browser or an installed web app after the tab is closed. It is a built-in channel named `push`, switched on by the `webPush` option. Without that option the plugin adds no table, no routes and no channel, and nothing about an existing install changes.
 
@@ -227,4 +226,3 @@ expect(await device.decrypt(transport.sent[0]!)).toMatchObject({ title: "Your br
 - `endpoint` is a unique column. On MySQL and MSSQL, better-auth makes unique string columns `varchar(255)`, which can be shorter than a Windows push endpoint. Prefer Postgres, SQLite or D1.
 - Add an index on `pushSubscription.userId` if your migration tool doesn't from the schema.
 
-</Next>
