@@ -13,11 +13,11 @@ describe("package.json", () => {
     peerDependenciesMeta?: Record<string, { optional?: boolean }>;
   };
 
-  it("is 0.12.0 on the better-auth 1.7.7 baseline", () => {
-    expect(pkg.version).toBe("0.12.0");
-    expect(pkg.peerDependencies?.["better-auth"]).toBe("^1.7.7");
+  it("is 0.13.0 on the better-auth 1.7.16 baseline", () => {
+    expect(pkg.version).toBe("0.13.0");
+    expect(pkg.peerDependencies?.["better-auth"]).toBe("^1.7.16");
     // emit imports @better-auth/core/context at runtime
-    expect(pkg.peerDependencies?.["@better-auth/core"]).toBe("^1.7.7");
+    expect(pkg.peerDependencies?.["@better-auth/core"]).toBe("^1.7.16");
     expect(pkg.peerDependenciesMeta?.["@better-auth/core"]?.optional).not.toBe(
       true,
     );
@@ -32,6 +32,15 @@ describe("package.json", () => {
       require: "./dist/mailer.cjs",
     });
   });
+
+  it.each(["README.md", "docs/upgrading.mdx"])(
+    "%s has the 0.13 upgrade notes",
+    (file) => {
+      const text = read(file);
+      expect(text).toContain("0.13");
+      expect(text).toContain("1.7.16");
+    },
+  );
 
   it.each(["README.md", "docs/upgrading.mdx"])(
     "%s has the 0.11 upgrade notes",

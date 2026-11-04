@@ -23,7 +23,7 @@ npm install @byo-oss/notifications @better-auth/core
 
 Using a coding agent? `npx skills add byo-oss/notifications` installs a skill that walks it through these steps (`npx skills sync` picks it up from `node_modules` too).
 
-Requires better-auth 1.7.7+. Install `@better-auth/core` at the same version as `better-auth`:
+Requires better-auth 1.7.16+. Install `@better-auth/core` at the same version as `better-auth`:
 
 ```
 npm install @byo-oss/notifications @better-auth/core
@@ -510,6 +510,13 @@ index("notification_delivery_notification_idx").on(table.notificationId)
 // only if you export without an organizationId:
 index("notification_created_idx").on(table.createdAt)
 ```
+
+## Upgrading to 0.13
+
+No migration, no schema change and no API change. Breaking:
+
+- **better-auth 1.7.16+.** The `better-auth` and `@better-auth/core` peers are now `^1.7.16` (they were `^1.7.7`), because 1.7.16 is a security release. The fix that touches this plugin is GHSA-c85h-5mrr-mgx4 (organization roles are trimmed and split on commas wherever stored or compared); the [release notes](https://better-auth.com/blog/security-release-2026-11-03) list the rest. To upgrade, move `better-auth` and every `@better-auth/*` package together to 1.7.16 or later, before or along with this package.
+- **Role matching in organization fan-out.** `notify` with `roles` now trims each stored role before matching. A member stored as `admin, owner` now gets notices sent to `roles: ["owner"]`, as better-auth 1.7.16 also treats them as an owner. Before, that member was skipped. Rows written before 1.7.16 can keep the space, so the trim covers them too. If you relied on the old miss, drop `owner` from `roles`.
 
 ## Upgrading to 0.12
 

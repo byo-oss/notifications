@@ -6,7 +6,7 @@ In-app notifications as a better-auth plugin (formerly `better-inbox`). `llms.tx
 
 The same steps, with checks, ship as a skill: `skills/byo-notifications/SKILL.md` (`npx skills add byo-oss/notifications`). Keep the two in step when setup changes.
 
-1. `npm install @byo-oss/notifications @better-auth/core`. Requires better-auth 1.7.7+. Install `@better-auth/core` at the same version as `better-auth`.
+1. `npm install @byo-oss/notifications @better-auth/core`. Requires better-auth 1.7.16+. Install `@better-auth/core` at the same version as `better-auth`.
 2. Server: add `inbox()` to `betterAuth({ plugins })`, then run the app's migration (`npx @better-auth/cli migrate`, or regenerate drizzle/prisma).
 3. Client: add `inboxClient()` from `@byo-oss/notifications/client` to `createAuthClient({ plugins })`.
 4. UI: render `<InboxButton client={authClient} onNavigate={...} />` from `@byo-oss/notifications/react` once, in the app shell. Pass the router's navigate to `onNavigate`.

@@ -13,7 +13,7 @@ The API reference is `node_modules/@byo-oss/notifications/llms.txt` once the pac
 
 Work through these in order. Each step ends on a check; move on only when it holds.
 
-1. **Install.** `npm install @byo-oss/notifications @better-auth/core` (use the repo's package manager). Requires better-auth 1.7.7+. Install `@better-auth/core` at the same version as `better-auth`. Done when both are in the dependencies of the package that holds the better-auth config, and of the web app if that's a separate package.
+1. **Install.** `npm install @byo-oss/notifications @better-auth/core` (use the repo's package manager). Requires better-auth 1.7.16+. Install `@better-auth/core` at the same version as `better-auth`. Done when both are in the dependencies of the package that holds the better-auth config, and of the web app if that's a separate package.
 
 2. **Server plugin.** Add `inbox()` from `@byo-oss/notifications` to `betterAuth({ plugins })`. If the app uses the organization plugin, list it too; org fan-out and org cleanup come from it. Done when the app typechecks.
 

@@ -5,7 +5,7 @@ In-app notifications as a better-auth plugin. Notifications are rows in the app'
 ## Install & wire
 
 npm install @byo-oss/notifications @better-auth/core
-// requires better-auth 1.7.7+; install @better-auth/core at the same version as better-auth
+// requires better-auth 1.7.16+; install @better-auth/core at the same version as better-auth
 
 // server: lib/auth.ts
 import { inbox } from "@byo-oss/notifications";
@@ -126,6 +126,7 @@ const seenRef = useSeenOnView(markSeen, { delayMs: 1000, threshold: 0.5 }); // <
 
 ## Notes
 
+- 0.13: better-auth and @better-auth/core peers ^1.7.16 (security release 2026-11-03; install every @better-auth/* package at 1.7.16 or later); notify({ roles }) trims each stored role before matching, so a member stored as "admin, owner" now receives roles: ["owner"]; no migration, no API change
 - 0.12: opt-in `inbox({ webPush })` adds a built-in `push` channel, table `pushSubscription` and endpoints `/inbox/push/subscribe|unsubscribe|status` (auth.api `subscribeWebPush`, `unsubscribeWebPush`, `webPushStatus`); new root exports `generateVapidKeys`, `DEFAULT_PUSH_HOSTS`; `/testing` exports `fakePushTransport`, `fakePushSubscription`. Re-run migrate with webPush set. Nothing changes without the option
 - 0.11: new `@byo-oss/notifications/mailer` entry, `mailerChannel({ mailer, replyTo?, render? })`, sends through any `Mailer` from `@byo-oss/mailer` (install it in the app, 0.1.1 or later); no `from` option. `wrapsEmail` is deprecated, unchanged, and will be removed in a later breaking release: `wrapsEmail({ from })` becomes `mailerChannel({ mailer: wrapsMailer({ from }) })`. wrapsMailer differs from wrapsEmail: it fails permanently on any @wraps.dev/email ValidationError (bad from, replyTo, recipient or empty subject) and on SES MessageRejected and InvalidParameterValue, where wrapsEmail failed only a bad recipient at once and retried the rest; it throws a TypeError at creation if from is empty; its client must resolve { messageId }; it RFC 2047-encodes a non-ASCII display name in from (mailer 0.1.1+). No schema change, no new options
 - 0.10: better-auth peer ^1.7.7 and a new required peer @better-auth/core (same version); notify rejects notifications.* types and inbox({ routes }) throws at creation for a notifications.* key; onEvent and byo hooks are new; stale sends with no attempts left are failed at most `limit` per sweep (hasMore can be true with nothing due, when the sweep stopped at the cap after failing rows there; rows past the cap stay "sending" until a later sweep); inbox() throws unless batchSize is an integer from 1 to 1000; no migration
