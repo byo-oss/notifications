@@ -82,6 +82,42 @@ describe("org fan-out", () => {
     }
   });
 
+  it("matches a stored role list with spaces after the commas", async () => {
+    const { auth, bob, carol, org } = await setupOrg();
+    // Rows written before better-auth 1.7.16 may hold "admin, owner"; the
+    // organization plugin trims new writes only, so write it past the plugin.
+    const { adapter } = await auth.$context;
+    await adapter.update({
+      model: "member",
+      where: [
+        { field: "organizationId", value: org.id },
+        { field: "userId", value: bob.user.id },
+      ],
+      update: { role: "admin, owner" },
+    });
+
+    const res = await auth.api.notify({
+      body: {
+        organizationId: org.id,
+        roles: ["owner"],
+        type: "billing.payment_failed",
+        title: "Owners only",
+      },
+    });
+    expect(res.count).toBe(2); // alice ("owner") + bob ("admin, owner")
+
+    const bobs = await auth.api.listNotifications({
+      headers: bob.headers,
+      query: {},
+    });
+    expect(bobs.notifications).toHaveLength(1);
+    const carols = await auth.api.listNotifications({
+      headers: carol.headers,
+      query: {},
+    });
+    expect(carols.notifications).toHaveLength(0);
+  });
+
   it("errors cleanly on bad addressing", async () => {
     const { auth, org } = await setupOrg();
 

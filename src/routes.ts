@@ -153,7 +153,10 @@ export const notify = (options: ResolvedInboxOptions) =>
         (member) =>
           !excluded.has(member.userId) &&
           (!roles?.length ||
-            member.role.split(",").some((role) => roles.includes(role))),
+            member.role
+              .split(",")
+              .map((r) => r.trim())
+              .some((role) => roles.includes(role))),
       );
 
       const notifications: Notification[] = [];
