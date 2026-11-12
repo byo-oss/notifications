@@ -517,7 +517,7 @@ No migration, no schema change and no API change. Breaking under the conventions
 
 - **zod 4.6.6+.** The `zod` dependency is now `^4.6.6` (it was `^4.4.3`), because zod 4.6.6 fixes GHSA-mrhx-c7xc-m3w5. An app that pins zod below that gets a second, newer copy installed for this package; move your own `zod` to 4.6.6 or later.
 - **`@byo-oss/core` 0.2.0.** The `@byo-oss/core` dependency is now `^0.2.0` (it was `^0.1.0`). Core 0.2.0 only narrowed its `better-auth` peer to `^1.7.16`, which this package already requires. An app on core 0.2.0 now gets one copy of core instead of two. Upgrade `@byo-oss/core` to 0.2.0 or later.
-- **vitest 4.1.11+ if vitest is installed.** The optional `vitest` peer is now `>=4.1.11` (it was `>=3`). An app that has vitest installed needs 4.1.11 or later even if it never imports `@byo-oss/notifications/testing`; npm stops with ERESOLVE otherwise. 4.1.11 closes GHSA-5xrq-8626-4rwp (critical, affects vitest below 3.2.6 and 4.0.x) and GHSA-82fw-gwwq-j7x9 (moderate, affects vitest below 4.1.11). This drops vitest 3 for `./testing` users.
+- **vitest 4.1.12+ on vitest 4, or 5.0.3+ on vitest 5, if vitest is installed.** The optional `vitest` peer is now `^4.1.12 || >=5.0.3` (it was `>=3`). An app that has vitest installed needs 4.1.12 or later on vitest 4, or 5.0.3 or later on vitest 5, even if it never imports `@byo-oss/notifications/testing`; npm stops with ERESOLVE otherwise. 4.1.12 and 5.0.3 close GHSA-5xrq-8626-4rwp (critical, affects vitest below 3.2.6 and 4.0.x), GHSA-82fw-gwwq-j7x9 (moderate, affects vitest 4.1.10 and earlier), GHSA-qxg6-89mg-rqv8 and GHSA-xp26-3454-mjgp (both in @vitest/mocker, which vitest pins exactly). This drops vitest 3 for `./testing` users.
 
 ## Upgrading to 0.13
 
