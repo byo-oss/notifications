@@ -513,11 +513,11 @@ index("notification_created_idx").on(table.createdAt)
 
 ## Upgrading to 0.14
 
-No migration, no schema change and no API change. Breaking, because three dependency ranges narrowed:
+No migration, no schema change and no API change. Breaking under the conventions (§8.4) because the optional vitest peer narrowed. The zod and `@byo-oss/core` dependency floors rose too:
 
-- **zod 4.6.6+.** The `zod` dependency is now `^4.6.6` (it was `^4.4.3`), because zod 4.6.6 fixes GHSA-mrhx-c7xc-m3w5. An app that pins zod below that gets a second, newer copy installed for this package, or a peer warning; move your own `zod` to 4.6.6 or later.
+- **zod 4.6.6+.** The `zod` dependency is now `^4.6.6` (it was `^4.4.3`), because zod 4.6.6 fixes GHSA-mrhx-c7xc-m3w5. An app that pins zod below that gets a second, newer copy installed for this package; move your own `zod` to 4.6.6 or later.
 - **`@byo-oss/core` 0.2.0.** The `@byo-oss/core` dependency is now `^0.2.0` (it was `^0.1.0`). Core 0.2.0 only narrowed its `better-auth` peer to `^1.7.16`, which this package already requires. An app on core 0.2.0 now gets one copy of core instead of two. Upgrade `@byo-oss/core` to 0.2.0 or later.
-- **vitest 3.2.6+ for `./testing`.** The optional `vitest` peer is now `>=3.2.6` (it was `>=3`), because 3.2.6 fixes GHSA-5xrq-8626-4rwp. It matters only if you import `@byo-oss/notifications/testing`.
+- **vitest 4.1.11+ if vitest is installed.** The optional `vitest` peer is now `>=4.1.11` (it was `>=3`). An app that has vitest installed needs 4.1.11 or later even if it never imports `@byo-oss/notifications/testing`; npm stops with ERESOLVE otherwise. 4.1.11 closes GHSA-5xrq-8626-4rwp (critical, affects vitest below 3.2.6 and 4.0.x) and GHSA-82fw-gwwq-j7x9 (moderate, affects vitest below 4.1.11). This drops vitest 3 for `./testing` users.
 
 ## Upgrading to 0.13
 

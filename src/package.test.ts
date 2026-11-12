@@ -25,9 +25,9 @@ describe("package.json", () => {
   });
 
   it("holds the security floors", () => {
-    // zod: GHSA-mrhx-c7xc-m3w5; vitest: GHSA-5xrq-8626-4rwp
+    // zod: GHSA-mrhx-c7xc-m3w5; vitest: GHSA-5xrq-8626-4rwp, GHSA-82fw-gwwq-j7x9
     expect(pkg.dependencies?.zod).toBe("^4.6.6");
-    expect(pkg.peerDependencies?.vitest).toBe(">=3.2.6");
+    expect(pkg.peerDependencies?.vitest).toBe(">=4.1.11");
     expect(pkg.peerDependenciesMeta?.vitest?.optional).toBe(true);
   });
 
