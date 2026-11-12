@@ -7,6 +7,14 @@ order: 3
 
 Each section covers one change. Read the sections between your current version and the latest. The default docs describe the latest published release. Sections marked next describe main, which isn't published yet.
 
+## 0.14
+
+No migration, no schema change and no API change. Breaking, because three dependency ranges narrowed:
+
+- **zod 4.6.6+.** The `zod` dependency is now `^4.6.6` (it was `^4.4.3`), because zod 4.6.6 fixes GHSA-mrhx-c7xc-m3w5. An app that pins zod below that gets a second, newer copy installed for this package, or a peer warning; move your own `zod` to 4.6.6 or later.
+- **`@byo-oss/core` 0.2.0.** The `@byo-oss/core` dependency is now `^0.2.0` (it was `^0.1.0`). Core 0.2.0 only narrowed its `better-auth` peer to `^1.7.16`, which this package already requires. An app on core 0.2.0 now gets one copy of core instead of two. Upgrade `@byo-oss/core` to 0.2.0 or later.
+- **vitest 3.2.6+ for `./testing`.** The optional `vitest` peer is now `>=3.2.6` (it was `>=3`), because 3.2.6 fixes GHSA-5xrq-8626-4rwp. It matters only if you import `@byo-oss/notifications/testing`.
+
 ## 0.13
 
 No migration, no schema change and no API change. Breaking:
