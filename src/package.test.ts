@@ -13,15 +13,22 @@ describe("package.json", () => {
     peerDependenciesMeta?: Record<string, { optional?: boolean }>;
   };
 
-  it("is 0.13.0 on the better-auth 1.7.16 baseline", () => {
-    expect(pkg.version).toBe("0.13.0");
+  it("is 0.14.0 on the better-auth 1.7.16 baseline", () => {
+    expect(pkg.version).toBe("0.14.0");
     expect(pkg.peerDependencies?.["better-auth"]).toBe("^1.7.16");
     // emit imports @better-auth/core/context at runtime
     expect(pkg.peerDependencies?.["@better-auth/core"]).toBe("^1.7.16");
     expect(pkg.peerDependenciesMeta?.["@better-auth/core"]?.optional).not.toBe(
       true,
     );
-    expect(pkg.dependencies?.["@byo-oss/core"]).toBe("^0.1.0");
+    expect(pkg.dependencies?.["@byo-oss/core"]).toBe("^0.2.0");
+  });
+
+  it("holds the security floors", () => {
+    // zod: GHSA-mrhx-c7xc-m3w5; vitest: GHSA-5xrq-8626-4rwp, GHSA-82fw-gwwq-j7x9, GHSA-qxg6-89mg-rqv8, GHSA-xp26-3454-mjgp
+    expect(pkg.dependencies?.zod).toBe("^4.6.6");
+    expect(pkg.peerDependencies?.vitest).toBe("^4.1.12 || >=5.0.3");
+    expect(pkg.peerDependenciesMeta?.vitest?.optional).toBe(true);
   });
 
   it("ships the ./mailer entry and depends on @byo-oss/mailer 0.2+", () => {
@@ -32,6 +39,16 @@ describe("package.json", () => {
       require: "./dist/mailer.cjs",
     });
   });
+
+  it.each(["README.md", "docs/upgrading.mdx"])(
+    "%s has the 0.14 upgrade notes",
+    (file) => {
+      const text = read(file);
+      expect(text).toContain("0.14");
+      expect(text).toContain("GHSA-mrhx-c7xc-m3w5");
+      expect(text).toContain("4.6.6");
+    },
+  );
 
   it.each(["README.md", "docs/upgrading.mdx"])(
     "%s has the 0.13 upgrade notes",
